@@ -52,6 +52,7 @@ logs/
 # Docker volumes / local data
 timescale_data/
 grafana_data/
+docker-compose.yml
 
 # Playwright
 playwright-report/
