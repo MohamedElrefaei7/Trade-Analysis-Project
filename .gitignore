@@ -1,0 +1,63 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Project context / Claude
+.claude/
+CONTEXT.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+pip-wheel-metadata/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Jupyter / IPython
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.session.sql
+.cursor/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Logs
+*.log
+logs/
+
+# Docker volumes / local data
+timescale_data/
+grafana_data/
+
+# Playwright
+playwright-report/
+test-results/
+
+# OS
+Thumbs.db
+
+# Prefect
+.prefect/

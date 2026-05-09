@@ -1,0 +1,424 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "description": "Rolling z-scores for the selected features. Bands at ±2σ mark tail events.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": true,
+            "axisColorMode": "text",
+            "axisLabel": "z-score",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": -2
+              },
+              {
+                "color": "transparent",
+                "value": -2
+              },
+              {
+                "color": "transparent",
+                "value": 2
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 14,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT date AS time,\n       feature_name AS metric,\n       z_score AS value\nFROM features\nWHERE feature_name IN ($features)\n  AND date >= NOW() - ($lookback)::interval\n  AND z_score IS NOT NULL\nORDER BY date;",
+          "refId": "A"
+        }
+      ],
+      "title": "Feature Z-Scores",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "description": "Raw feature values (not z-scored) for the same selection.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "value",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT date AS time,\n       feature_name AS metric,\n       value\nFROM features\nWHERE feature_name IN ($features)\n  AND date >= NOW() - ($lookback)::interval\n  AND value IS NOT NULL\nORDER BY date;",
+          "refId": "A"
+        }
+      ],
+      "title": "Raw Feature Values",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "description": "Latest absolute z-score across all features — tail-risk snapshot.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1.5
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "z_score"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "basic",
+                  "type": "color-background"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "date"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "id": 3,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "abs_z"
+          }
+        ]
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH latest AS (\n    SELECT feature_name, MAX(date) AS last_date\n    FROM features\n    WHERE z_score IS NOT NULL\n    GROUP BY feature_name\n)\nSELECT f.feature_name,\n       f.date::timestamp AS date,\n       f.value,\n       f.z_score,\n       ABS(f.z_score) AS abs_z\nFROM features f\nJOIN latest l\n  ON l.feature_name = f.feature_name\n AND l.last_date    = f.date\nORDER BY ABS(f.z_score) DESC NULLS LAST;",
+          "refId": "A"
+        }
+      ],
+      "title": "Latest Z-Scores (all features)",
+      "type": "table"
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": [
+    "signals",
+    "features"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": [
+            "BDI.daily_close",
+            "FBX.composite",
+            "port.CNSHA.vessels_in_port"
+          ],
+          "value": [
+            "BDI.daily_close",
+            "FBX.composite",
+            "port.CNSHA.vessels_in_port"
+          ]
+        },
+        "datasource": {
+          "type": "postgres",
+          "uid": "timescaledb"
+        },
+        "definition": "SELECT DISTINCT feature_name FROM features ORDER BY feature_name;",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Features",
+        "multi": true,
+        "name": "features",
+        "options": [],
+        "query": "SELECT DISTINCT feature_name FROM features ORDER BY feature_name;",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "90 days",
+          "value": "90 days"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Lookback",
+        "multi": false,
+        "name": "lookback",
+        "options": [
+          {
+            "selected": false,
+            "text": "30 days",
+            "value": "30 days"
+          },
+          {
+            "selected": true,
+            "text": "90 days",
+            "value": "90 days"
+          },
+          {
+            "selected": false,
+            "text": "180 days",
+            "value": "180 days"
+          },
+          {
+            "selected": false,
+            "text": "365 days",
+            "value": "365 days"
+          }
+        ],
+        "query": "30 days,90 days,180 days,365 days",
+        "queryValue": "",
+        "skipUrlSync": false,
+        "type": "custom"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-90d",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "Signal Monitor",
+  "uid": "signal-monitor",
+  "version": 1,
+  "weekStart": ""
+}
