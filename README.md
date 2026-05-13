@@ -155,7 +155,7 @@ Five tabs, in priority order:
 
 ---
 
-## Project Structure
+## Project Architecture
 
 ```
 ├── scheduler.py          # Prefect orchestrator + AIS daemon
