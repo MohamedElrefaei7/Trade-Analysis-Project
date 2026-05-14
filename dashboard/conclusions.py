@@ -61,6 +61,73 @@ import pandas as pd
 
 
 # ---------------------------------------------------------------------------
+# Formatting helpers
+# ---------------------------------------------------------------------------
+
+def _ordinal(n: int) -> str:
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def _z_label(z: float) -> str:
+    az = abs(z)
+    if az >= 2.5:
+        return "unusually high" if z > 0 else "unusually low"
+    if az >= 2.0:
+        return "elevated" if z > 0 else "depressed"
+    if az >= 1.5:
+        return "slightly elevated" if z > 0 else "slightly depressed"
+    return "near normal"
+
+
+def _format_headline(conclusion_type: str, **kwargs) -> str:
+    """Single source of truth for all conclusion headline templates."""
+    if conclusion_type == "threshold_breach":
+        return (
+            f"Higher probability of {kwargs['direction']} {kwargs['target']} "
+            f"over the next {kwargs['horizon']}d. "
+            f"{kwargs['feature']} is {kwargs['z_label']}, "
+            f"and this has historically preceded {kwargs['target']} moves "
+            f"with r={kwargs['r']:+.2f}."
+        )
+    if conclusion_type == "regime_change":
+        framing = kwargs["framing"]
+        if framing == "newly significant":
+            return (
+                f"New signal forming: {kwargs['feature']} now tracks "
+                f"{kwargs['target']} (r went from {kwargs['prior']:+.2f} to "
+                f"{kwargs['recent']:+.2f} over the last {kwargs['days']} days)."
+            )
+        if framing == "broke down":
+            return (
+                f"Signal weakening: {kwargs['feature']} → {kwargs['target']} "
+                f"relationship has faded (r dropped from {kwargs['prior']:+.2f} "
+                f"to {kwargs['recent']:+.2f})."
+            )
+        return (
+            f"{kwargs['feature']} → {kwargs['target']} correlation shifted "
+            f"from {kwargs['prior']:+.2f} to {kwargs['recent']:+.2f} "
+            f"over the last {kwargs['days']} days."
+        )
+    if conclusion_type == "model_extreme":
+        return (
+            f"Model leaning {kwargs['direction']} on {kwargs['target']}: "
+            f"prediction is in the {kwargs['pct_ordinal']} percentile of its history."
+        )
+    if conclusion_type == "stale_data":
+        return (
+            f"{kwargs['n']} feature(s) haven't updated recently — "
+            f"treat related conclusions with caution."
+        )
+    if conclusion_type == "no_signal":
+        return "Nothing notable today. All features within normal range."
+    return ""
+
+
+# ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
 
@@ -268,22 +335,15 @@ def detect_threshold_breaches(
         )
 
         lag_days = int(best["lag_days"])
-        lag_phrase = (
-            f"leads {best['target_name']} by {abs(lag_days)}d"
-            if lag_days > 0
-            else (
-                f"lags {best['target_name']} by {abs(lag_days)}d"
-                if lag_days < 0
-                else f"is contemporaneous with {best['target_name']}"
-            )
-        )
 
-        granger_str = "n/a" if granger_p is None else f"{granger_p:.3f}"
-        headline = (
-            f"{feature_name} is {z:+.2f}σ from normal. "
-            f"Historically {lag_phrase} with r={float(best['pearson_r']):+.2f} "
-            f"(n={int(best['sample_size'])}, granger_p={granger_str}); "
-            f"implication is {target_direction} {best['target_name']}."
+        headline = _format_headline(
+            "threshold_breach",
+            direction=target_direction,
+            target=best["target_name"],
+            horizon=max(abs(lag_days), 1),
+            feature=feature_name,
+            z_label=_z_label(z),
+            r=float(best["pearson_r"]),
         )
 
         conclusions.append(Conclusion(
@@ -375,13 +435,15 @@ def detect_regime_changes(
             framing = "shifted"
             sev = "info"
 
-        # Use the most recent lag_days for the headline.
         latest_lag = group.sort_values("as_of_date").iloc[-1]["lag_days"]
-        headline = (
-            f"{feature} → {target} relationship has {framing}: "
-            f"r moved from {float(prior.mean()):+.2f} to {float(recent.mean()):+.2f} "
-            f"over the last {config.regime_change_lookback_days}d "
-            f"(window={int(window)}d, lag={int(latest_lag)}d)."
+        headline = _format_headline(
+            "regime_change",
+            framing=framing,
+            feature=feature,
+            target=target,
+            prior=float(prior.mean()),
+            recent=float(recent.mean()),
+            days=config.regime_change_lookback_days,
         )
 
         conclusions.append(Conclusion(
@@ -461,11 +523,12 @@ def detect_model_extremes(
 
         score = _score_model_extreme(percentile)
         direction = "bullish" if prediction > hist_vals.median() else "bearish"
-        pct_label = f"{int(percentile * 100)}th percentile"
 
-        headline = (
-            f"Model is {direction} on {target} over next {horizon}d: "
-            f"prediction {prediction:+.4f} ({pct_label} of historical predictions)."
+        headline = _format_headline(
+            "model_extreme",
+            direction=direction,
+            target=target,
+            pct_ordinal=_ordinal(int(percentile * 100)),
         )
 
         conclusions.append(Conclusion(
@@ -516,12 +579,7 @@ def detect_stale_data(
         return []
 
     stale_names = stale["feature_name"].tolist()
-    headline = (
-        f"{len(stale_names)} feature(s) have not updated in >"
-        f"{config.max_feature_age_days} days: {', '.join(stale_names[:3])}"
-        + ("…" if len(stale_names) > 3 else "")
-        + ". Treat conclusions involving these features with caution."
-    )
+    headline = _format_headline("stale_data", n=len(stale_names))
 
     return [Conclusion(
         severity="warning",
@@ -565,8 +623,10 @@ def signal_stability(
     if len(pair) < n_windows * 5:
         return []
 
-    chunks = np.array_split(pair, n_windows)
-    return [float(c["pearson_r"].mean()) for c in chunks if len(c) > 0]
+    series = pair["pearson_r"].values
+    chunks = np.array_split(series, n_windows)
+    results = [float(c.mean()) for c in chunks if len(c) > 0]
+    return [v for v in results if not np.isnan(v)]
 
 
 # ---------------------------------------------------------------------------
@@ -608,10 +668,7 @@ def generate_conclusions(
             severity="info",
             severity_score=0.0,
             conclusion_type="no_signal",
-            headline=(
-                "No features outside ±2σ and no model predictions in extreme "
-                "percentiles. System is quiet."
-            ),
+            headline=_format_headline("no_signal"),
             supporting_numbers={},
         )]
 

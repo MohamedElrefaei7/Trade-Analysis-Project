@@ -51,6 +51,7 @@ from clients.base import engine
 from dashboard.conclusions import (
     Conclusion,
     ConclusionConfig,
+    _ordinal,
     generate_conclusions,
     signal_stability,
 )
@@ -347,6 +348,44 @@ if start >= end:
     st.stop()
 
 
+# ── Per-feature cadence ───────────────────────────────────────────────────────
+#
+# Maps feature name prefixes to (max_age_days, cadence_label).
+# A feature is only "overdue" if age_days > max_age_days for its cadence.
+# The rules are ordered most-specific first; first match wins.
+_CADENCE_RULES: list[tuple[str, int, str]] = [
+    ("FRED.GDP.",            120, "quarterly"),
+    ("FRED.trade_balance.",   60, "monthly"),
+    ("FRED.AUDUSD.",           5, "daily"),
+    ("FRED.CNYUSD.",           5, "daily"),
+    ("COMTRADE.",             90, "monthly"),
+    ("port.USLAX.",           60, "monthly"),
+    ("WCI.",                  12, "weekly"),
+    ("BDI.",                   4, "daily"),
+]
+_DEFAULT_CADENCE = (4, "daily")
+
+
+def _feature_cadence(feature_name: str) -> tuple[int, str]:
+    """Return (max_expected_age_days, cadence_label) for a feature."""
+    for prefix, max_age, label in _CADENCE_RULES:
+        if feature_name.startswith(prefix):
+            return max_age, label
+    return _DEFAULT_CADENCE
+
+
+def _annotate_freshness(feats: pd.DataFrame) -> pd.DataFrame:
+    """Add expected_age, cadence, and overdue columns to a features frame."""
+    today_ts = pd.Timestamp(date.today())
+    feats = feats.copy()
+    feats["age_days"] = (today_ts - pd.to_datetime(feats["date"])).dt.days
+    cadence_info = feats["feature_name"].map(_feature_cadence)
+    feats["expected_age"] = cadence_info.map(lambda t: t[0])
+    feats["cadence"] = cadence_info.map(lambda t: t[1])
+    feats["overdue"] = feats["age_days"] > feats["expected_age"]
+    return feats
+
+
 # ── Status banner (pulled from features freshness + recent alerts) ────────────
 def render_status_banner() -> None:
     """One-line health summary at the top of every tab. Drives trust."""
@@ -360,27 +399,24 @@ def render_status_banner() -> None:
         st.warning("⚠️ No features in database — has the normalizer run?")
         return
 
-    today_d = date.today()
-    feats["age_days"] = (
-        pd.Timestamp(today_d) - pd.to_datetime(feats["date"])
-    ).dt.days
-    stale_count = int((feats["age_days"] > config.max_feature_age_days).sum())
+    feats = _annotate_freshness(feats)
+    overdue_count = int(feats["overdue"].sum())
     total = len(feats)
 
-    if stale_count == 0:
+    if overdue_count == 0:
         st.success(
-            f"🟢 All systems green — {total} features fresh "
+            f"🟢 All systems green — {total} features current "
             f"(latest {feats['date'].max()})"
         )
-    elif stale_count <= 3:
+    elif overdue_count <= 3:
+        names = ", ".join(feats.loc[feats["overdue"], "feature_name"].tolist())
         st.warning(
-            f"🟡 {stale_count}/{total} features stale "
-            f"(>{config.max_feature_age_days}d old). "
+            f"🟡 {overdue_count}/{total} features overdue: {names}. "
             f"See **Health** tab."
         )
     else:
         st.error(
-            f"🔴 {stale_count}/{total} features stale. "
+            f"🔴 {overdue_count}/{total} features overdue. "
             f"Pipeline likely broken. See **Health** tab."
         )
 
@@ -478,23 +514,11 @@ def render_today_tab() -> None:
 
     # ── Section C: What changed since yesterday ─────────────────────────────
     st.subheader("C. What changed since yesterday")
-    deltas = _compute_z_deltas()
-    if deltas.empty:
-        st.info("Not enough recent data to compute day-over-day deltas.")
+    changes = _compute_daily_changes()
+    if changes.empty:
+        st.info("Not enough recent data to compute day-over-day changes.")
     else:
-        st.caption(
-            "Top 5 features by absolute change in z-score from yesterday. "
-            "Δ catches the 'I haven't checked in three days' case."
-        )
-        st.dataframe(
-            deltas.head(5).style.format({
-                "z_yesterday": "{:+.2f}",
-                "z_today":     "{:+.2f}",
-                "delta":       "{:+.2f}",
-            }),
-            use_container_width=True,
-            hide_index=True,
-        )
+        st.dataframe(changes.head(5), use_container_width=True, hide_index=True)
 
 
 def _render_target_card(
@@ -531,7 +555,7 @@ def _render_target_card(
         ]["predicted_value"].dropna()
         if len(hist) >= 30:
             pct = float((hist < pred_value).mean()) * 100
-            pct_str = f"({pct:.0f}th pct)"
+            pct_str = f"({_ordinal(int(pct))} pct)"
         else:
             pct_str = "(thin history)"
         pred_str = f"{pred_value:+.4f} over {horizon}d"
@@ -572,33 +596,76 @@ def _render_target_card(
     st.plotly_chart(fig, use_container_width=True,
                     config={"displayModeBar": False})
 
-    if st.button("Drill in →", key=f"drill_{target}", use_container_width=True):
+    if st.button("Expand →", key=f"expand_{target}", use_container_width=True):
         _navigate({"tab": "Predictions", "filters": {"target_name": target}})
         st.rerun()
 
 
-def _compute_z_deltas() -> pd.DataFrame:
-    """Today vs. yesterday z-score change per feature, sorted by |Δ|."""
+_COUNT_UNITS: list[tuple[str, str]] = [
+    ("vessels", "vessels"),
+    ("teu", "TEU"),
+    ("calls", "calls"),
+    ("count", ""),
+]
+
+
+def _fmt_change(feature_name: str, today_val: float, prev_val: float) -> str:
+    """Format a raw-value change as either % (prices/indices) or abs+unit (counts)."""
+    if pd.isna(today_val) or pd.isna(prev_val):
+        return "n/a"
+    fname = feature_name.lower()
+    for pattern, unit in _COUNT_UNITS:
+        if pattern in fname:
+            delta = int(round(today_val - prev_val))
+            return f"{delta:+d} {unit}".strip()
+    if prev_val == 0:
+        return "n/a"
+    pct = (today_val - prev_val) / abs(prev_val) * 100
+    return f"{pct:+.1f}%"
+
+
+def _compute_daily_changes() -> pd.DataFrame:
+    """Current value + 1-day and 7-day changes per feature, sorted by |1-day change|."""
     df = load_features_for_delta(days_back=10)
     if df.empty:
         return pd.DataFrame()
 
-    last_two_dates = sorted(df["date"].unique())[-2:]
-    if len(last_two_dates) < 2:
+    dates = sorted(df["date"].unique())
+    if len(dates) < 2:
         return pd.DataFrame()
-    yesterday, today_d = last_two_dates
 
-    today_z = df[df["date"] == today_d].set_index("feature_name")["z_score"]
-    yest_z = df[df["date"] == yesterday].set_index("feature_name")["z_score"]
-    common = today_z.index.intersection(yest_z.index)
+    today_d = dates[-1]
+    prev_1d = dates[-2]
+    week_ago_target = today_d - pd.Timedelta(days=7)
+    prev_7d_candidates = [d for d in dates if d <= week_ago_target]
+    prev_7d = max(prev_7d_candidates) if prev_7d_candidates else None
 
-    out = pd.DataFrame({
-        "feature":     common,
-        "z_yesterday": yest_z.loc[common].values,
-        "z_today":     today_z.loc[common].values,
-    })
-    out["delta"] = out["z_today"] - out["z_yesterday"]
-    out = out.reindex(out["delta"].abs().sort_values(ascending=False).index)
+    def _vals(d) -> pd.Series:
+        return df[df["date"] == d].set_index("feature_name")["value"]
+
+    today_vals = _vals(today_d)
+    prev_1d_vals = _vals(prev_1d)
+    prev_7d_vals = _vals(prev_7d) if prev_7d else pd.Series(dtype=float)
+
+    common = today_vals.index.intersection(prev_1d_vals.index)
+    rows = []
+    for feat in common:
+        tv = float(today_vals[feat])
+        p1 = float(prev_1d_vals[feat])
+        p7 = float(prev_7d_vals[feat]) if feat in prev_7d_vals.index else float("nan")
+        # Sort key: absolute % change (or abs delta for counts) for 1-day move
+        fname = feat.lower()
+        is_count = any(p in fname for p, _ in _COUNT_UNITS)
+        sort_key = abs(tv - p1) if is_count or p1 == 0 else abs((tv - p1) / abs(p1))
+        rows.append({
+            "Feature": feat,
+            "Current value": f"{tv:,.4g}",
+            "1-day change": _fmt_change(feat, tv, p1),
+            "7-day change": _fmt_change(feat, tv, p7),
+            "_sort": sort_key,
+        })
+
+    out = pd.DataFrame(rows).sort_values("_sort", ascending=False).drop(columns=["_sort"])
     return out.reset_index(drop=True)
 
 
@@ -1014,7 +1081,6 @@ def render_explore_tab() -> None:
     default_features = [
         f for f in (
             "BDI.daily_close",
-            "FBX.composite",
             "FRED.INDPRO",
             "port.CNSHA.vessels_in_port",
             "air.cargo_flights.daily",
@@ -1167,27 +1233,28 @@ def render_health_tab() -> None:
         st.error("No features in database.")
         return
 
-    today_d = date.today()
-    feats["age_days"] = (
-        pd.Timestamp(today_d) - pd.to_datetime(feats["date"])
-    ).dt.days
-    feats = feats.sort_values("age_days", ascending=False)
+    feats = _annotate_freshness(feats).sort_values("age_days", ascending=False)
 
     st.subheader("Feature freshness")
-    cnt_fresh = int((feats["age_days"] <= config.max_feature_age_days).sum())
-    cnt_stale = int((feats["age_days"] > config.max_feature_age_days).sum())
+    cnt_current = int((~feats["overdue"]).sum())
+    cnt_overdue = int(feats["overdue"].sum())
     c1, c2, c3 = st.columns(3)
     c1.metric("Total features", len(feats))
-    c2.metric("Fresh", cnt_fresh)
-    c3.metric("Stale", cnt_stale,
-              delta=None if cnt_stale == 0 else "needs attention")
+    c2.metric("Current", cnt_current)
+    c3.metric("Overdue", cnt_overdue,
+              delta=None if cnt_overdue == 0 else "needs attention")
+
+    display = feats[["feature_name", "cadence", "date", "age_days",
+                      "expected_age", "overdue", "z_score"]].reset_index(drop=True)
+
+    def _age_color(row):
+        color = "color: #cc3300" if row["overdue"] else ""
+        return [color] * len(row)
+
     st.dataframe(
-        feats[["feature_name", "date", "age_days", "z_score"]]
-        .reset_index(drop=True)
-        .style.format({"z_score": "{:+.2f}"})
-        .map(lambda v: "color:red" if isinstance(v, (int, float))
-             and v > config.max_feature_age_days else "",
-             subset=["age_days"]),
+        display.style
+        .apply(_age_color, axis=1)
+        .format({"z_score": "{:+.2f}"}),
         use_container_width=True, hide_index=True,
     )
 
@@ -1212,7 +1279,7 @@ def render_health_tab() -> None:
     else:
         retrain = preds.copy()
         retrain["age_days"] = (
-            pd.Timestamp(today_d) - pd.to_datetime(retrain["date"])
+            pd.Timestamp(date.today()) - pd.to_datetime(retrain["date"])
         ).dt.days
         st.dataframe(
             retrain[[

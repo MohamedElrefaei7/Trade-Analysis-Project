@@ -117,7 +117,6 @@ default_features = [
     f
     for f in (
         "BDI.daily_close",
-        "FBX.composite",
         "FRED.INDPRO",
         "port.CNSHA.vessels_in_port",
         "air.cargo_flights.daily",
