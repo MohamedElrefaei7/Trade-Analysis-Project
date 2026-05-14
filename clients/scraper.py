@@ -148,6 +148,13 @@ _BDI_PRIMARY_RE  = re.compile(
 # Fallback: any 3–7 digit number — the index level is filtered out by range.
 _BDI_FALLBACK_RE = re.compile(r'([\d,]{3,7})')
 
+# Numbers that follow these words are year/era references, not index levels.
+# "Highest since 2023", "last seen in 2008", "compared to 2022 levels", etc.
+_BDI_YEAR_CONTEXT_RE = re.compile(
+    r'\b(?:since|in|of|from|during|versus|vs\.?|compared\s+to|like|to)\s+([\d,]{3,7})\s*(?:\b|$)(?!\s*points?\b)',
+    re.I,
+)
+
 # Plausible BDI range. Filters out point-change values (≤ a few hundred) and
 # anything obviously non-index. Historical extremes ~600 (2020) to ~5500 (2008).
 _BDI_MIN, _BDI_MAX = 500, 20_000
@@ -158,21 +165,35 @@ def _parse_int_with_commas(raw: str) -> int | None:
     return int(raw) if raw.isdigit() else None
 
 
-def _extract_bdi_level(title: str) -> int | None:
-    """Pull the BDI index level out of a HSN post title. Returns None if the
-    title has no parseable numeric value (e.g. qualitative headlines)."""
+def _extract_bdi_level(title: str) -> tuple[int | None, bool]:
+    """
+    Pull the BDI index level out of a HSN post title.
+
+    Returns (value, is_primary_match):
+      - value: the parsed index level, or None if not found
+      - is_primary_match: True when the primary directional regex matched
+        (high confidence); False when the fallback was used (lower confidence)
+    """
     m = _BDI_PRIMARY_RE.search(title)
     if m:
         v = _parse_int_with_commas(m.group(1))
         if v is not None and _BDI_MIN <= v <= _BDI_MAX:
-            return v
+            return v, True
+
+    # Collect numbers that are clearly year/era references so we can exclude
+    # them from the fallback. "Highest since 2023" should return None, not 2023.
+    year_refs: set[int] = set()
+    for ym in _BDI_YEAR_CONTEXT_RE.finditer(title):
+        yv = _parse_int_with_commas(ym.group(1))
+        if yv is not None:
+            year_refs.add(yv)
 
     candidates = [
         v
         for v in (_parse_int_with_commas(x) for x in _BDI_FALLBACK_RE.findall(title))
-        if v is not None and _BDI_MIN <= v <= _BDI_MAX
+        if v is not None and _BDI_MIN <= v <= _BDI_MAX and v not in year_refs
     ]
-    return max(candidates) if candidates else None
+    return (max(candidates) if candidates else None), False
 
 
 def _fetch_bdi_posts(latest_ts: datetime | None, max_pages: int = 10) -> list[dict]:
@@ -257,18 +278,29 @@ def bdi_scraper() -> int:
         logger.info("BDI: no new posts (already up-to-date or API empty)")
         return 0
 
-    # One value per UTC date — keep the latest post per day if duplicates exist.
+    # One value per UTC date. Primary-regex matches beat fallback-only matches;
+    # within the same confidence tier, keep the latest timestamp.
     by_date: dict[date, dict] = {}
     skipped_qualitative = 0
     for p in posts:
-        value = _extract_bdi_level(p["title"])
+        value, is_primary = _extract_bdi_level(p["title"])
         if value is None:
             skipped_qualitative += 1
             logger.debug("BDI: no numeric value in %r", p["title"])
             continue
         d = p["ts"].date()
-        if d not in by_date or p["ts"] > by_date[d]["ts"]:
-            by_date[d] = {"ts": p["ts"], "value": value, "title": p["title"]}
+        existing = by_date.get(d)
+        if existing is None:
+            by_date[d] = {"ts": p["ts"], "value": value, "title": p["title"],
+                          "primary": is_primary}
+        elif is_primary and not existing["primary"]:
+            # A primary match always supersedes a fallback match.
+            by_date[d] = {"ts": p["ts"], "value": value, "title": p["title"],
+                          "primary": is_primary}
+        elif is_primary == existing["primary"] and p["ts"] > existing["ts"]:
+            # Same confidence: keep the later post.
+            by_date[d] = {"ts": p["ts"], "value": value, "title": p["title"],
+                          "primary": is_primary}
 
     if skipped_qualitative:
         logger.info("BDI: skipped %d qualitative headlines", skipped_qualitative)

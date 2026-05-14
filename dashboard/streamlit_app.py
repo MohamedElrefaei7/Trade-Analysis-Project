@@ -618,8 +618,10 @@ def _fmt_change(feature_name: str, today_val: float, prev_val: float) -> str:
         if pattern in fname:
             delta = int(round(today_val - prev_val))
             return f"{delta:+d} {unit}".strip()
-    if prev_val == 0:
-        return "n/a"
+    # Values already in rate/normalized form (|val| < 1) — e.g. momentum, returns,
+    # log-ratios. % change on a near-zero base produces nonsense like 3455%.
+    if abs(prev_val) < 1.0:
+        return f"{today_val - prev_val:+.4f}"
     pct = (today_val - prev_val) / abs(prev_val) * 100
     return f"{pct:+.1f}%"
 
