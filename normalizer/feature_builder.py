@@ -35,7 +35,7 @@ from sqlalchemy import text
 
 from clients.base import Session, logger
 
-from . import port_resolver, vessel_normalizer
+from . import port_resolver, port_summary_builder, vessel_normalizer
 from .lag_adjuster import apply_lag
 from .seasonal_adjuster import deseasonalize
 from .time_aligner import to_daily
@@ -105,25 +105,25 @@ def _fetch_port_daily(session) -> pd.DataFrame:
 
 
 def _fetch_cargo_routes(session) -> pd.DataFrame:
-    """Daily cargo-flight count per (origin_iata, dest_iata) pair."""
+    """Daily cargo-flight count per (origin_icao, dest_icao) pair."""
     rows = session.execute(
         text(
             """
             SELECT DATE(departed_at) AS date,
-                   origin_iata, dest_iata,
+                   origin_icao, dest_icao,
                    COUNT(*)          AS flights
             FROM flight_events
             WHERE cargo_flag IS TRUE
-              AND origin_iata IS NOT NULL
-              AND dest_iata   IS NOT NULL
+              AND origin_icao IS NOT NULL
+              AND dest_icao   IS NOT NULL
             GROUP BY 1, 2, 3
             ORDER BY 1
             """
         )
     ).fetchall()
     if not rows:
-        return pd.DataFrame(columns=["date", "origin_iata", "dest_iata", "flights"])
-    return pd.DataFrame(rows, columns=["date", "origin_iata", "dest_iata", "flights"])
+        return pd.DataFrame(columns=["date", "origin_icao", "dest_icao", "flights"])
+    return pd.DataFrame(rows, columns=["date", "origin_icao", "dest_icao", "flights"])
 
 
 # ── Feature assembly ─────────────────────────────────────────────────────────
@@ -244,7 +244,7 @@ def _build_air_features(session, bag: list[dict]) -> None:
     df = _fetch_cargo_routes(session)
     if df.empty:
         return
-    for (origin, dest), sub in df.groupby(["origin_iata", "dest_iata"]):
+    for (origin, dest), sub in df.groupby(["origin_icao", "dest_icao"]):
         single = sub[["date", "flights"]].rename(
             columns={"date": "ts", "flights": "value"}
         )
@@ -301,16 +301,18 @@ def build() -> int:
 def run_all() -> dict:
     """
     Full Step 7 pipeline: resolve port names, smooth AIS into port calls,
-    then assemble the features table. This is what the nightly scheduler
-    calls.
+    roll port calls up into the daily port summary, then assemble the
+    features table. This is what the nightly scheduler calls.
     """
     logger.info("normalizer: starting nightly run")
     resolver_stats = port_resolver.run()
     vessel_stats = vessel_normalizer.run()
+    summary_rows = port_summary_builder.run()
     n = build()
     summary = {
         "port_resolver": resolver_stats,
         "vessel_normalizer": vessel_stats,
+        "port_summary_rows": summary_rows,
         "features_upserted": n,
     }
     logger.info("normalizer: done — %s", summary)

@@ -9,10 +9,11 @@ Execution order (feature_builder.run_all enforces this):
 
     1. port_resolver        — fix port names / backfill UN/LOCODE
     2. vessel_normalizer    — smooth AIS, detect arrivals/departures
-    3. time_aligner         — resample everything to daily
-    4. lag_adjuster         — shift series by publication lag
-    5. seasonal_adjuster    — subtract STL seasonal component
-    6. feature_builder      — assemble final features table (last)
+    3. port_summary_builder — roll port_calls up into port_daily_summary
+    4. time_aligner         — resample everything to daily
+    5. lag_adjuster         — shift series by publication lag
+    6. seasonal_adjuster    — subtract STL seasonal component
+    7. feature_builder      — assemble final features table (last)
 
 Quick-start:
     from normalizer import run_all

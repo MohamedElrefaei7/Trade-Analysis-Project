@@ -299,7 +299,7 @@ def normalizer_flow() -> dict:
     Nightly transformation pass. Runs last in the day's schedule so it
     sees the output of every upstream ingest. Executes in fixed order:
 
-        port_resolver → vessel_normalizer → feature_builder
+        port_resolver → vessel_normalizer → port_summary_builder → feature_builder
 
     Writes to `features`; never mutates raw tables. The feature rows
     produced here are what the backtest layer consumes exclusively.

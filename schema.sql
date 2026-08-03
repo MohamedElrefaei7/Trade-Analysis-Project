@@ -108,8 +108,8 @@ CREATE TABLE flight_events (
     icao24          TEXT NOT NULL,                -- Aircraft transponder hex ID
     callsign        TEXT,
     aircraft_type   TEXT,                         -- e.g. '747F', '777F'
-    origin_iata     CHAR(4),
-    dest_iata       CHAR(4),
+    origin_icao     CHAR(4),                     -- ICAO airport code (OpenSky /flights/aircraft, not IATA)
+    dest_icao       CHAR(4),                     -- ICAO airport code (OpenSky /flights/aircraft, not IATA)
     departed_at     TIMESTAMPTZ NOT NULL,
     arrived_at      TIMESTAMPTZ,
     cargo_flag      BOOLEAN NOT NULL DEFAULT FALSE,
@@ -120,7 +120,7 @@ CREATE TABLE flight_events (
 SELECT create_hypertable('flight_events', 'departed_at',
     chunk_time_interval => INTERVAL '1 month');
 
-CREATE INDEX idx_flights_route_ts ON flight_events(origin_iata, dest_iata, departed_at DESC);
+CREATE INDEX idx_flights_route_ts ON flight_events(origin_icao, dest_icao, departed_at DESC);
 CREATE INDEX idx_flights_cargo    ON flight_events(cargo_flag, departed_at DESC);
 
 -- ── DERIVED: Daily port-level aggregates ─────────────────────
