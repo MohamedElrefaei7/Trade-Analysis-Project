@@ -270,3 +270,49 @@ def test_unique_keys_match_documented_contract():
         "CLAUDE.md's documented unique keys no longer match the live schema:\n"
         + "\n".join(mismatches)
     )
+
+
+# ---------------------------------------------------------------------------
+# test_regime_change_score_never_exceeds_70 / test_regime_change_score_still_scales
+# ---------------------------------------------------------------------------
+#
+# _score_regime_change is documented (dashboard/conclusions.py's own scoring
+# comment, and the general "0-100 scale" contract in CLAUDE.md) as capping out
+# around 70. The implementation multiplies an already-capped `base` by
+# `(current_abs_r / 0.5)`, which is > 1 whenever current_abs_r > 0.5 — a common
+# value, not an edge case — pushing the product well past 70. These two tests
+# pin the fix: the ceiling must hold, and it must hold without flattening the
+# ranking the scoring system exists for.
+
+from dashboard.conclusions import _score_regime_change  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "correlation_delta,current_abs_r",
+    [
+        (0.20, 0.50),   # boundary case — already respected the cap pre-fix
+        (0.30, 0.70),
+        (0.50, 0.90),   # exactly the values that broke the cap before the fix
+        (0.50, 1.00),
+        (0.99, 1.00),
+    ],
+)
+def test_regime_change_score_never_exceeds_70(correlation_delta, current_abs_r):
+    score = _score_regime_change(correlation_delta, current_abs_r)
+    assert score <= 70.0, (
+        f"_score_regime_change({correlation_delta}, {current_abs_r}) = {score} "
+        "exceeds the documented 70 ceiling"
+    )
+
+
+def test_regime_change_score_still_scales():
+    weak = _score_regime_change(correlation_delta=0.05, current_abs_r=0.10)
+    strong = _score_regime_change(correlation_delta=0.15, current_abs_r=0.40)
+
+    assert strong > weak, (
+        "a stronger correlation shift must still score higher than a weaker "
+        "one — a fix that clamps every result to 70 would pass the ceiling "
+        "test while destroying this ranking"
+    )
+    assert strong <= 70.0
+    assert weak <= 70.0

@@ -247,7 +247,13 @@ def _score_threshold_breach(z: float, abs_r: float, granger_p: float | None) -> 
 
 def _score_regime_change(correlation_delta: float, current_abs_r: float) -> float:
     base = min(40 + abs(correlation_delta) * 100, 70)
-    return base * (current_abs_r / 0.5)
+    # Clamp the OUTPUT, not the multiplier: (current_abs_r / 0.5) exceeds 1
+    # whenever current_abs_r > 0.5 (common, not an edge case), so the raw
+    # product can blow past the documented 70 ceiling. Capping the multiplier
+    # instead would require re-deriving it by hand every time `base`'s formula
+    # changes to keep the product under 70 — clamping here stays correct
+    # automatically regardless of how `base` is computed.
+    return min(base * (current_abs_r / 0.5), 70.0)
 
 
 def _score_model_extreme(percentile: float) -> float:
