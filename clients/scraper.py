@@ -1,7 +1,7 @@
 """
 scraper.py — Web scrapers for shipping data with no free API equivalent.
 
-Three scrapers, one file:
+Two scrapers, one file:
 
   bdi_scraper()       → Baltic Dry Index daily level from Hellenic Shipping
                         News (WordPress REST API + headline parsing)
@@ -11,12 +11,8 @@ Three scrapers, one file:
                         rates from weekly Drewry commentary on HSN
                         → economic_benchmarks  series_id='WCI:COMPOSITE' etc.
 
-  port_la_scraper()   → Port of Los Angeles monthly TEU throughput
-                        → port_daily_summary   port_unlocode='USLAX'
-
 Dependencies (already in requirements.txt):
-    pip install playwright beautifulsoup4 lxml
-    playwright install chromium
+    pip install beautifulsoup4 lxml
 
 Implementation notes:
   • BDI uses the Hellenic Shipping News WP REST API and parses the index
@@ -27,25 +23,20 @@ Implementation notes:
     each Drewry weekly commentary, then regex-parses the composite ($/FEU)
     and lane-specific rates (Shanghai→Genoa, Shanghai→Rotterdam,
     Shanghai→Los Angeles, Shanghai→New York, Rotterdam→New York).
-  • Port of LA historical pages require JS for the stats table — Playwright used.
 
 Usage:
     from clients.scraper import run
-    run()                           # all three
+    run()                           # both
     run(["bdi"])                    # single scraper by name
-    run(["bdi", "port_la"])         # subset
 """
 
 import random
 import re
 import time
-import urllib.robotparser
-from datetime import date, datetime, timezone
-from urllib.parse import urlparse
+from datetime import datetime, timezone
 
 import requests
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 from sqlalchemy import text
 
 from .base import Session, latest_ts, logger
@@ -67,45 +58,6 @@ _HTTP_HEADERS = {
 
 def _polite_delay(lo: float = 2.0, hi: float = 5.0) -> None:
     time.sleep(random.uniform(lo, hi))
-
-
-# ── Robots.txt guard ──────────────────────────────────────────────────────────
-
-def _robots_allows(url: str) -> bool:
-    """Return True if robots.txt permits fetching this URL."""
-    parsed = urlparse(url)
-    robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
-    rp = urllib.robotparser.RobotFileParser()
-    rp.set_url(robots_url)
-    try:
-        rp.read()
-        return rp.can_fetch(_UA, url)
-    except Exception as exc:
-        logger.warning("Could not read %s: %s — proceeding", robots_url, exc)
-        return True
-
-
-# ── Playwright browser factory ────────────────────────────────────────────────
-
-def _new_browser(pw):
-    """Launch Chromium with flags that reduce bot-detection fingerprint."""
-    browser = pw.chromium.launch(
-        headless=True,
-        args=[
-            "--disable-blink-features=AutomationControlled",
-            "--disable-dev-shm-usage",
-        ],
-    )
-    return browser
-
-
-def _new_context(browser):
-    return browser.new_context(
-        user_agent=_UA,
-        viewport={"width": 1280, "height": 800},
-        locale="en-US",
-        timezone_id="America/New_York",
-    )
 
 
 # ── Shared DB helpers ─────────────────────────────────────────────────────────
@@ -618,200 +570,12 @@ def wci_scraper() -> int:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Scraper 3 — Port of Los Angeles monthly TEU throughput
-# ══════════════════════════════════════════════════════════════════════════════
-
-_PORT_LA_BASE = "https://portoflosangeles.org"
-_PORT_LA_STATS_URL = (
-    f"{_PORT_LA_BASE}/Business/statistics/Container-Statistics"
-    "/Historical-TEU-Statistics-{year}"
-)
-
-_MONTH_NUM = {
-    "january": 1,  "february": 2,  "march": 3,    "april": 4,
-    "may": 5,      "june": 6,      "july": 7,      "august": 8,
-    "september": 9, "october": 10, "november": 11, "december": 12,
-}
-
-# Table column indices (0-based) in the historical TEU statistics page.
-# Verified against live page: table[1] on the historical pages.
-# Row structure: [Month, Loaded Imports, Empty Imports, Total Imports,
-#                 Loaded Exports, Empty Exports, Total Exports, Total TEUs,
-#                 Prior Year Change]
-_COL_MONTH         = 0
-_COL_LOADED_IMP    = 1
-_COL_EMPTY_IMP     = 2
-_COL_TOTAL_IMP     = 3
-_COL_LOADED_EXP    = 4
-_COL_EMPTY_EXP     = 5
-_COL_TOTAL_EXP     = 6
-_COL_TOTAL_TEU     = 7
-
-
-def _int_teu(raw: str) -> int | None:
-    """Parse a TEU value like "812,000.25" → 812000."""
-    try:
-        return int(float(raw.strip().replace(",", "")))
-    except (ValueError, AttributeError):
-        return None
-
-
-def _scrape_port_la_year(page, year: int) -> list[dict]:
-    """
-    Navigate to the Port of LA historical TEU page for one year and return
-    a list of port_daily_summary row dicts for months with data.
-
-    The page requires JavaScript to render the statistics table.
-    """
-    url = _PORT_LA_STATS_URL.format(year=year)
-    logger.info("Port LA: fetching %s", url)
-
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=25_000)
-        page.wait_for_timeout(3_000)
-    except PWTimeout:
-        logger.error("Port LA: timeout loading %s", url)
-        return []
-    except Exception as exc:
-        logger.error("Port LA: error loading %s — %s", url, exc)
-        return []
-
-    soup = BeautifulSoup(page.content(), "lxml")
-    tables = soup.find_all("table")
-
-    # The stats table is table[1] (table[0] is a search widget)
-    stats_table = None
-    for t in tables:
-        rows = t.find_all("tr")
-        if len(rows) >= 6:   # must have at least a few month rows
-            headers = [th.get_text(strip=True).lower()
-                       for th in rows[0].find_all(["th", "td"])]
-            if any("import" in h or "teu" in h or "export" in h
-                   for h in headers):
-                stats_table = t
-                break
-
-    if not stats_table:
-        logger.warning(
-            "Port LA: stats table not found on %s — "
-            "check table structure. Headers of all tables: %s",
-            url,
-            [[c.get_text(strip=True)[:20] for c in t.find_all(["th","td"])[:5]]
-             for t in tables],
-        )
-        return []
-
-    rows_out: list[dict] = []
-    data_rows = stats_table.find_all("tr")[1:]   # skip header row
-
-    for tr in data_rows:
-        cells = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
-        if len(cells) <= _COL_TOTAL_TEU:
-            continue
-
-        month_name = cells[_COL_MONTH].lower().strip()
-        month_num  = _MONTH_NUM.get(month_name)
-        if not month_num:
-            continue
-
-        total_teu   = _int_teu(cells[_COL_TOTAL_TEU])
-        total_imp   = _int_teu(cells[_COL_TOTAL_IMP])
-        total_exp   = _int_teu(cells[_COL_TOTAL_EXP])
-
-        if total_teu is None or total_teu == 0:
-            continue  # future month with no data yet
-
-        rows_out.append(
-            {
-                "port_unlocode": "USLAX",
-                "date": date(year, month_num, 1),   # first of the month
-                "container_count": total_teu,
-                "arrivals": total_imp,
-                "departures": total_exp,
-            }
-        )
-
-    _polite_delay(1.5, 3.0)
-    return rows_out
-
-
-def port_la_scraper(years_back: int = 2) -> int:
-    """
-    Scrape Port of LA monthly TEU container throughput into port_daily_summary.
-
-    Navigates to the Port of LA historical TEU statistics pages (one per year):
-        portoflosangeles.org/Business/statistics/Container-Statistics/
-            Historical-TEU-Statistics-<year>
-
-    Table columns captured:
-        Total Imports  → arrivals
-        Total Exports  → departures
-        Total TEUs     → container_count
-
-    Data is monthly; date is stored as the 1st of each month.
-    Uses ON CONFLICT DO UPDATE so re-running is idempotent.
-
-    Returns the number of rows upserted.
-    """
-    if not _robots_allows(_PORT_LA_BASE + "/business/statistics"):
-        logger.warning("Port LA: robots.txt disallows scraping — skipping")
-        return 0
-
-    current_year = datetime.now().year
-    target_years = [current_year - i for i in range(years_back)]
-
-    all_rows: list[dict] = []
-
-    with sync_playwright() as pw:
-        browser = _new_browser(pw)
-        ctx = _new_context(browser)
-        page = ctx.new_page()
-
-        for year in target_years:
-            year_rows = _scrape_port_la_year(page, year)
-            all_rows.extend(year_rows)
-            logger.info("Port LA: %d — %d months scraped", year, len(year_rows))
-
-        browser.close()
-
-    if not all_rows:
-        logger.warning("Port LA: no data extracted")
-        return 0
-
-    upserted = 0
-    with Session() as session:
-        for row in all_rows:
-            session.execute(
-                text(
-                    """
-                    INSERT INTO port_daily_summary
-                        (port_unlocode, date, container_count, arrivals, departures)
-                    VALUES
-                        (:port_unlocode, :date, :container_count,
-                         :arrivals, :departures)
-                    ON CONFLICT (port_unlocode, date) DO UPDATE SET
-                        container_count = EXCLUDED.container_count,
-                        arrivals        = EXCLUDED.arrivals,
-                        departures      = EXCLUDED.departures
-                    """
-                ),
-                row,
-            )
-            upserted += 1
-        session.commit()
-
-    logger.info("Port LA: %d rows upserted into port_daily_summary", upserted)
-    return upserted
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 # Orchestrator
 # ══════════════════════════════════════════════════════════════════════════════
 
 _SCRAPERS = {
-    "bdi":     bdi_scraper,
-    "wci":     wci_scraper,
-    "port_la": port_la_scraper,
+    "bdi": bdi_scraper,
+    "wci": wci_scraper,
 }
 
 
@@ -820,12 +584,12 @@ def run(targets: list[str] | None = None) -> None:
     Run all scrapers (or a named subset) in sequence.
 
     Args:
-        targets: list of scraper names — "bdi", "wci", "port_la".
-                 Defaults to all three.
+        targets: list of scraper names — "bdi", "wci".
+                 Defaults to both.
 
     Example:
-        run()                   # all three
-        run(["bdi", "port_la"]) # skip WCI
+        run()          # both
+        run(["bdi"])   # skip WCI
     """
     names = targets if targets is not None else list(_SCRAPERS)
     unknown = set(names) - set(_SCRAPERS)

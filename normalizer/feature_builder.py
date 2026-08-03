@@ -20,8 +20,6 @@ filter with simple LIKE patterns:
     port.<UNLOCODE>.<metric>
     BDI.<metric>
     WCI.<metric>
-    FRED.<metric>[.lag_adjusted]
-    COMTRADE.<flow>
     air.cargo_flights.<origin>_<dest>
 
 z_score is computed over a rolling 90-day window so all features land on
@@ -36,30 +34,12 @@ from sqlalchemy import text
 from clients.base import Session, logger
 
 from . import port_resolver, port_summary_builder, vessel_normalizer
-from .lag_adjuster import apply_lag
 from .seasonal_adjuster import deseasonalize
 from .time_aligner import to_daily
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
 ZSCORE_WINDOW = 90     # days — rolling window for standardisation
-
-# Map FRED series_id → (feature-name stem, deseasonalize?)
-FRED_FEATURES: dict[str, tuple[str, bool]] = {
-    "FRED:GDP":       ("FRED.GDP",            False),
-    "FRED:BOPGSTB":   ("FRED.trade_balance",  False),
-    "FRED:DEXUSAL":   ("FRED.AUDUSD",         False),
-    "FRED:DEXCHUS":   ("FRED.CNYUSD",         False),
-    "FRED:WPUSI0200": ("FRED.import_price_index", False),
-}
-
-# Map Comtrade series_id → friendly feature name.
-COMTRADE_FEATURES: dict[str, str] = {
-    "COMTRADE:CN-US-85": "COMTRADE.CN_US_electronics",
-    "COMTRADE:CN-US-27": "COMTRADE.CN_US_fuels",
-    "COMTRADE:AU-CN-26": "COMTRADE.AU_CN_iron_ore",
-    "COMTRADE:BR-CN-12": "COMTRADE.BR_CN_soybeans",
-}
 
 
 # ── Fetch helpers ────────────────────────────────────────────────────────────
@@ -217,27 +197,6 @@ def _build_bench_features(session, bag: list[dict]) -> None:
             continue
         daily = to_daily(raw, agg="last", is_market=True)
         _add_feature(bag, name, daily)
-
-    # FRED macro — lag-adjusted where lag_days > 0.
-    for series_id, (stem, _) in FRED_FEATURES.items():
-        raw = _fetch_bench(session, series_id)
-        if raw.empty:
-            continue
-        lag = int(raw["lag_days"].iloc[0] or 0)
-        daily = to_daily(raw, agg="last", is_market=True)
-        adjusted, was_shifted = apply_lag(daily, lag)
-        name = f"{stem}.lag_adjusted" if was_shifted else stem
-        _add_feature(bag, name, adjusted, lag_adjusted=was_shifted)
-
-    # UN Comtrade — always lag-adjusted (4–6 week release lag baked in).
-    for series_id, name in COMTRADE_FEATURES.items():
-        raw = _fetch_bench(session, series_id)
-        if raw.empty:
-            continue
-        lag = int(raw["lag_days"].iloc[0] or 0)
-        daily = to_daily(raw, agg="last")
-        adjusted, was_shifted = apply_lag(daily, lag)
-        _add_feature(bag, name, adjusted, lag_adjusted=was_shifted)
 
 
 def _build_air_features(session, bag: list[dict]) -> None:

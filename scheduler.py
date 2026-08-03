@@ -10,12 +10,8 @@ with a watchdog thread that auto-restarts it on failure.
   ─────────────────────  ───────────────────  ────────────────────────────────
   AIS positions          continuous (daemon)  n/a — background thread
   Port call refresh      every 2 hours        port-call-refresh
-  OpenSky air freight    daily  06:00 UTC     opensky-daily
-  FRED macro data        daily  07:00 UTC     fred-daily
   BDI scraper            daily  18:30 UTC     bdi-daily (post market close)
   Drewry WCI rates       weekly Fri 09:00     wci-weekly
-  UN Comtrade trade      monthly 15th 08:00   comtrade-monthly
-  Port of LA TEU         monthly 16th 08:00   port-la-monthly
   Normalizer (Step 7)    daily  23:30 UTC     normalizer-nightly
   Targets builder        daily  23:45 UTC     targets-nightly
   Signals sweep          daily  23:55 UTC     signals-nightly
@@ -37,8 +33,7 @@ in-process server, detach the scheduler from the persistent run history,
 and lose every flow result on restart. We fail fast at startup instead.
 
 Environment variables required (.env):
-    DATABASE_URL, PREFECT_API_URL, AISSTREAM_API_KEY, FRED_API_KEY,
-    OPENSKY_USER, OPENSKY_PASS, COMTRADE_SUBSCRIPTION_KEY
+    DATABASE_URL, PREFECT_API_URL, AISSTREAM_API_KEY
 """
 
 import asyncio
@@ -54,10 +49,7 @@ from sqlalchemy import text
 
 from clients.base import Session, logger as pipeline_logger
 from clients.aisstream import stream as _ais_stream
-from clients.fred import run as _fred_run
-from clients.comtrade import run as _comtrade_run
-from clients.opensky import run as _opensky_run
-from clients.scraper import bdi_scraper, wci_scraper, port_la_scraper
+from clients.scraper import bdi_scraper, wci_scraper
 from normalizer import run_all as _normalizer_run
 from targets import run_all as _targets_run
 from signals import run_all as _signals_run
@@ -199,43 +191,14 @@ def port_call_refresh_flow() -> dict:
     return results
 
 
-# ── OpenSky — daily 06:00 UTC ────────────────────────────────────────────────
-
-@flow(name="opensky-daily", log_prints=True)
-def opensky_flow() -> None:
-    """
-    Poll all configured bounding boxes on OpenSky for large / heavy aircraft.
-    Cargo-operator callsigns get cargo_flag=True in flight_events.
-    """
-    log = get_run_logger()
-    log.info("Starting OpenSky air freight poll…")
-    _opensky_run()
-    log.info("OpenSky poll complete")
-
-
-# ── FRED macro — daily 07:00 UTC ─────────────────────────────────────────────
-
-@flow(name="fred-daily", log_prints=True)
-def fred_flow() -> None:
-    """
-    Fetch the five configured FRED series (GDP, trade balance, AUD/USD,
-    CNY/USD, import price index) and append new observations to
-    economic_benchmarks with series_id prefix FRED:.
-    """
-    log = get_run_logger()
-    log.info("Starting FRED macro ingest…")
-    _fred_run()
-    log.info("FRED ingest complete")
-
-
 # ── BDI scraper — daily 18:30 UTC (post market close) ───────────────────────
 
 @flow(name="bdi-daily", log_prints=True)
 def bdi_flow() -> None:
     """
-    Scrape the Baltic Dry Index closing value from Investing.com.
+    Scrape the Baltic Dry Index closing value from Hellenic Shipping News
+    (WordPress REST API, no headless browser needed).
     Runs after 18:30 UTC so the day's close is published.
-    Uses Playwright (headless Chromium) — JS-rendered page.
     """
     log = get_run_logger()
     log.info("Starting BDI scraper…")
@@ -257,38 +220,6 @@ def wci_flow() -> None:
     log.info("Starting WCI scraper…")
     n = wci_scraper()
     log.info("WCI: %d rows inserted", n)
-
-
-# ── UN Comtrade — monthly 15th 08:00 UTC ─────────────────────────────────────
-
-@flow(name="comtrade-monthly", log_prints=True)
-def comtrade_flow() -> None:
-    """
-    Fetch UN Comtrade bilateral trade flow data for configured country-commodity
-    pairs (CN→US electronics/fuels, AU→CN iron ore, BR→CN soybeans).
-    Comtrade data lags 4–6 weeks; running on the 15th catches the previous
-    month's release.
-    """
-    log = get_run_logger()
-    log.info("Starting Comtrade ingest…")
-    _comtrade_run()
-    log.info("Comtrade ingest complete")
-
-
-# ── Port of LA TEU — monthly 16th 08:00 UTC ─────────────────────────────────
-
-@flow(name="port-la-monthly", log_prints=True)
-def port_la_flow() -> None:
-    """
-    Scrape Port of LA monthly container throughput (TEUs, imports, exports)
-    from their historical statistics pages. Port of LA publishes ~2 weeks
-    after month end; running on the 16th reliably catches the prior month.
-    Upserts into port_daily_summary (date = first of month).
-    """
-    log = get_run_logger()
-    log.info("Starting Port of LA scraper…")
-    n = port_la_scraper(years_back=2)
-    log.info("Port LA: %d rows upserted", n)
 
 
 # ── Normalizer (Step 7) — daily 23:30 UTC ───────────────────────────────────
@@ -393,22 +324,10 @@ def _build_deployments() -> list:
             description="Audit open port calls and monitor AIS stream health.",
             tags=["ais", "monitoring"],
         ),
-        opensky_flow.to_deployment(
-            name="opensky-daily",
-            schedule=Cron("0 6 * * *", timezone="UTC"),
-            description="Scrape ADS-B states for large/heavy aircraft.",
-            tags=["air", "opensky", "daily"],
-        ),
-        fred_flow.to_deployment(
-            name="fred-daily",
-            schedule=Cron("0 7 * * *", timezone="UTC"),
-            description="Fetch FRED macro: GDP, trade balance, FX rates.",
-            tags=["macro", "fred", "daily"],
-        ),
         bdi_flow.to_deployment(
             name="bdi-daily",
             schedule=Cron("30 18 * * *", timezone="UTC"),
-            description="Scrape Baltic Dry Index from Investing.com.",
+            description="Scrape Baltic Dry Index from Hellenic Shipping News.",
             tags=["shipping", "scraper", "daily"],
         ),
         wci_flow.to_deployment(
@@ -416,18 +335,6 @@ def _build_deployments() -> list:
             schedule=Cron("0 9 * * 5", timezone="UTC"),
             description="Drewry World Container Index spot rates (composite + 5 lanes).",
             tags=["shipping", "scraper", "weekly"],
-        ),
-        comtrade_flow.to_deployment(
-            name="comtrade-monthly",
-            schedule=Cron("0 8 15 * *", timezone="UTC"),
-            description="UN Comtrade bilateral trade flows.",
-            tags=["macro", "comtrade", "monthly"],
-        ),
-        port_la_flow.to_deployment(
-            name="port-la-monthly",
-            schedule=Cron("0 8 16 * *", timezone="UTC"),
-            description="Port of LA monthly TEU throughput.",
-            tags=["port", "scraper", "monthly"],
         ),
         normalizer_flow.to_deployment(
             name="normalizer-nightly",
@@ -524,12 +431,8 @@ def main() -> None:
     pipeline_logger.info("")
     pipeline_logger.info("Scheduled flows:")
     pipeline_logger.info("  %-28s  every 2 hours", "port-call-refresh")
-    pipeline_logger.info("  %-28s  daily  06:00 UTC", "opensky-daily")
-    pipeline_logger.info("  %-28s  daily  07:00 UTC", "fred-daily")
     pipeline_logger.info("  %-28s  daily  18:30 UTC", "bdi-daily")
     pipeline_logger.info("  %-28s  weekly Fri 09:00 UTC", "wci-weekly")
-    pipeline_logger.info("  %-28s  monthly 15th 08:00 UTC", "comtrade-monthly")
-    pipeline_logger.info("  %-28s  monthly 16th 08:00 UTC", "port-la-monthly")
     pipeline_logger.info("  %-28s  daily  23:30 UTC", "normalizer-nightly")
     pipeline_logger.info("  %-28s  daily  23:45 UTC", "targets-nightly")
     pipeline_logger.info("  %-28s  daily  23:55 UTC", "signals-nightly")
