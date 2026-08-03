@@ -34,8 +34,7 @@ pipeline breaks silently.
 | Stage | Module | Reads | Writes |
 |---|---|---|---|
 | Ingest | `clients/aisstream.py` | AISStream WebSocket (external) | `vessels`, `positions`, `port_calls` (rough, real-time arrivals/departures) |
-| Ingest | `clients/fred.py`, `clients/comtrade.py`, `clients/scraper.py` (`bdi_scraper`, `wci_scraper`) | external HTTP / scraped pages | `economic_benchmarks` |
-| Ingest | `clients/scraper.py` (`port_la_scraper`) | Port of LA website | `port_daily_summary` (`USLAX` rows only) |
+| Ingest | `clients/scraper.py` (`bdi_scraper`, `wci_scraper`) | Hellenic Shipping News (WP REST API) | `economic_benchmarks` |
 | Normalize | `normalizer/port_resolver.py` | `port_calls`, `ports`, `positions` | `port_calls` (backfills `port_unlocode`) |
 | Normalize | `normalizer/vessel_normalizer.py` | `positions`, `ports` | `port_calls` (re-smoothed arrivals, closes departures) |
 | Normalize | `normalizer/port_summary_builder.py` | `port_calls`, `vessels` | `port_daily_summary` (AIS-tracked ports only — never `USLAX`) |
@@ -121,10 +120,10 @@ detectors be unit-tested with synthetic frames instead of a live database.
 SQLAlchemy 2.0's bind-parameter parser breaks on `:param::type` — the `::`
 gets parsed as part of the token. Every cast on a *bound parameter* in this
 codebase goes through `CAST(:x AS sometype)` (see `clients/aisstream.py`,
-`clients/fred.py`, `clients/comtrade.py`). Plain `expression::type` on a
+`clients/scraper.py`). Plain `expression::type` on a
 column or function result (not a bind param) is fine and already used in a
-few places (`normalizer/port_summary_builder.py`, `clients/opensky.py`,
-`scheduler.py`) — the rule is specifically about parameters, not all casts.
+few places (`normalizer/port_summary_builder.py`, `scheduler.py`) —
+the rule is specifically about parameters, not all casts.
 Someone will "tidy" a `CAST(:p AS type)` back into `:p::type`; it will parse
 fine in the editor and break at runtime, not at import time.
 
@@ -143,12 +142,11 @@ feature lags the target by `|lag_days|` days.
 | `port.<UNLOCODE>.<metric>` | `port.NLRTM.vessels_in_port` | `port_daily_summary` |
 | `BDI.<metric>` | `BDI.daily_close` | `economic_benchmarks` |
 | `WCI.<metric>` | `WCI.composite` | `economic_benchmarks` |
-| `FRED.<metric>[.lag_adjusted]` | `FRED.trade_balance.lag_adjusted` | `economic_benchmarks` |
-| `COMTRADE.<flow>` | `COMTRADE.AU_CN_iron_ore` | `economic_benchmarks` |
 | `air.cargo_flights.<origin>_<dest>` | `air.cargo_flights.RJTT_KLAX` | `flight_events` |
 
-`.lag_adjusted` is only appended to the name when `apply_lag()` actually
-shifted the series (`lag_days > 0`); a zero-lag series keeps the bare stem.
+`features.lag_adjusted` is always written as a literal `False` — nothing left
+in the pipeline has a publication lag to correct for (see `CONTEXT.md` for
+what was removed and why).
 
 ### AIS sentinel clamping (`clients/aisstream.py::_write_position`)
 
@@ -181,10 +179,7 @@ cap across detectors without per-type priority rules.
 | Variable | Purpose |
 |---|---|
 | `DATABASE_URL` | SQLAlchemy connection string for the TimescaleDB instance |
-| `FRED_API_KEY` | FRED (Federal Reserve Economic Data) API key |
 | `AISSTREAM_API_KEY` | AISStream WebSocket API key |
-| `OPENSKY_USER` / `OPENSKY_PASS` | OpenSky Network credentials (optional — anonymous access has lower rate limits) |
-| `COMTRADE_SUBSCRIPTION_KEY` | UN Comtrade API subscription key |
 | `PREFECT_API_URL` | URL of a running `prefect server start` instance — `scheduler.py` fails fast if this is unset or unreachable |
 | `GRAFANA_PASSWORD` | Grafana admin password (Docker Compose) |
 | `SLACK_WEBHOOK_URL` | Optional — enables the alerter's Slack digest post |
@@ -210,9 +205,9 @@ re-apply this file against a database that already has data in it.
 
 Running two instances causes both to re-register Prefect deployments on
 startup, which can reset scheduled trigger times. Daily flows self-heal
-within 24h (they just re-trigger on their next scheduled time); weekly and
-monthly flows do not — a reset trigger time can mean `wci-weekly` or
-`comtrade-monthly` silently never fires again until someone notices.
+within 24h (they just re-trigger on their next scheduled time); `wci-weekly`
+— the only non-daily flow left — does not: a reset trigger time can mean it
+silently never fires again until someone notices.
 
 ### Prefect server must be running before `scheduler.py` starts
 
