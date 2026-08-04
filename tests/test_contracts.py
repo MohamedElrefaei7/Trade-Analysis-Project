@@ -316,3 +316,66 @@ def test_regime_change_score_still_scales():
     )
     assert strong <= 70.0
     assert weak <= 70.0
+
+
+# ---------------------------------------------------------------------------
+# test_port_features_cover_all_summary_ports
+# ---------------------------------------------------------------------------
+#
+# normalizer/feature_builder.py's port branch is supposed to be port-agnostic
+# (it groups by whatever port_unlocode values are present in
+# port_daily_summary), but that's only meaningful if `features` is actually
+# rebuilt after `port_daily_summary` picks up a new port — a stale `features`
+# table can silently leave a port's rows stuck at an old snapshot (e.g. only
+# `USLAX`, from back when `port_daily_summary` had no other ports at all —
+# see CONTEXT.md § normalizer/port_summary_builder.py). This test catches
+# that staleness directly: every port present in port_daily_summary must have
+# a matching port.<UNLOCODE>.* row in features, and vice versa. Strict
+# equality, not "USLAX is a subset of" — a superset (an unlocode in features
+# no longer in port_daily_summary) is just as much a sign something didn't
+# get rebuilt as a missing one.
+
+_PORT_FEATURE_NAME_RE = re.compile(r"^port\.([A-Z0-9]{5})\.")
+
+
+def test_port_features_cover_all_summary_ports():
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+        from sqlalchemy import create_engine, text
+    except ImportError:
+        pytest.skip("sqlalchemy/dotenv not installed — skipping live-schema contract check")
+
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        pytest.skip("DATABASE_URL is not set (checked process env and .env) — skipping live-schema contract check")
+    try:
+        engine = create_engine(database_url)
+        with engine.connect() as conn:
+            summary_ports = {
+                row[0] for row in conn.execute(
+                    text("SELECT DISTINCT port_unlocode FROM port_daily_summary")
+                ).fetchall()
+            }
+            feature_names = [
+                row[0] for row in conn.execute(
+                    text("SELECT DISTINCT feature_name FROM features WHERE feature_name LIKE 'port.%'")
+                ).fetchall()
+            ]
+    except Exception as exc:
+        pytest.skip(f"Database unreachable at DATABASE_URL — skipping ({exc})")
+
+    if not summary_ports:
+        pytest.skip("port_daily_summary is empty — nothing to compare against")
+
+    feature_ports = {
+        m.group(1) for name in feature_names
+        if (m := _PORT_FEATURE_NAME_RE.match(name))
+    }
+
+    assert feature_ports == summary_ports, (
+        f"port_daily_summary has ports {sorted(summary_ports)} but features "
+        f"only has port.<UNLOCODE>.* rows for {sorted(feature_ports)} — "
+        "feature_builder.build() (or run_all()) needs to be re-run so every "
+        "port in port_daily_summary reaches the features table."
+    )
