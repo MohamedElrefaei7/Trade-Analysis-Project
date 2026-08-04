@@ -1,9 +1,9 @@
 """
 normalizer — Step 7 transformation layer.
 
-Reads raw ingest tables (positions, flight_events, port_calls,
-economic_benchmarks, port_daily_summary) and produces analysis-ready rows
-in `features`. Never mutates raw tables.
+Reads raw ingest tables (positions, port_calls, economic_benchmarks,
+port_daily_summary) and produces analysis-ready rows in `features`.
+Never mutates raw tables.
 
 Execution order (feature_builder.run_all enforces this):
 

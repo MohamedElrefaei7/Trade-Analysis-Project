@@ -13,10 +13,10 @@ see `CONTEXT.md` — that's the running log. This file is the stable part.
 
 ## 1. What this project is
 
-Trade_Analysis_Project ingests live vessel positions, port calls, air-cargo
-sightings, shipping indices, and macro benchmarks, then normalizes them into
-a single daily `features` table used to discover lead-lag relationships and
-forecast shipping-index returns. A nightly ElasticNet model per
+Trade_Analysis_Project ingests live vessel positions, port calls, and
+shipping indices, then normalizes them into a single daily `features` table
+used to discover lead-lag relationships and forecast shipping-index returns.
+A nightly ElasticNet model per
 (target, horizon) turns those features into predictions, and an
 edge-triggered alerter plus a Streamlit dashboard surface what changed today.
 The system exists to answer one question — "what should I pay attention to
@@ -38,7 +38,7 @@ pipeline breaks silently.
 | Normalize | `normalizer/port_resolver.py` | `port_calls`, `ports`, `positions` | `port_calls` (backfills `port_unlocode`) |
 | Normalize | `normalizer/vessel_normalizer.py` | `positions`, `ports` | `port_calls` (re-smoothed arrivals, closes departures) |
 | Normalize | `normalizer/port_summary_builder.py` | `port_calls`, `vessels` | `port_daily_summary` (AIS-tracked ports only — never `USLAX`) |
-| Normalize | `normalizer/feature_builder.py` | `port_daily_summary`, `economic_benchmarks`, `flight_events` | `features` |
+| Normalize | `normalizer/feature_builder.py` | `port_daily_summary`, `economic_benchmarks` | `features` |
 | Targets | `targets/builder.py` | `features` | `targets` |
 | Signals | `signals/builder.py` | `features`, `targets` | `signals` |
 | Models | `models/trainer.py` | `targets`, `features` | `predictions` |
@@ -53,14 +53,13 @@ pipeline breaks silently.
 ### The modeling and alerting layers only ever read `features` (+ its derived tables)
 
 `models/trainer.py` and `alerts/builder.py` never query `positions`,
-`port_calls`, `flight_events`, or `economic_benchmarks` directly — only
-`features`, `targets`, `signals`, and `predictions`. This is what makes
-re-running the normalizer safe: everything downstream is re-derivable from
-`features`.
+`port_calls`, or `economic_benchmarks` directly — only `features`, `targets`,
+`signals`, and `predictions`. This is what makes re-running the normalizer
+safe: everything downstream is re-derivable from `features`.
 
 ### `port_calls` has two writers — this is deliberate, not a violation
 
-`positions`, `flight_events`, and `economic_benchmarks` are written only by
+`positions` and `economic_benchmarks` are written only by
 their owning `clients/` ingest module and never touched again. `port_calls`
 is the one exception: `clients/aisstream.py` inserts rough arrival/departure
 rows in real time, and the normalizer layer — `normalizer/vessel_normalizer.py`
@@ -142,7 +141,6 @@ feature lags the target by `|lag_days|` days.
 | `port.<UNLOCODE>.<metric>` | `port.NLRTM.vessels_in_port` | `port_daily_summary` |
 | `BDI.<metric>` | `BDI.daily_close` | `economic_benchmarks` |
 | `WCI.<metric>` | `WCI.composite` | `economic_benchmarks` |
-| `air.cargo_flights.<origin>_<dest>` | `air.cargo_flights.RJTT_KLAX` | `flight_events` |
 
 `features.lag_adjusted` is always written as a literal `False` — nothing left
 in the pipeline has a publication lag to correct for (see `CONTEXT.md` for

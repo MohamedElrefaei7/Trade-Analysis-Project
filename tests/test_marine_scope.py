@@ -1,16 +1,29 @@
 """
 test_marine_scope.py — enforcement tests for the marine/AIS-only scope
-reduction (removal of opensky, FRED, Comtrade, Port of LA, and the
-lag_adjuster normalizer step). Each test should go red if the corresponding
-removal is ever silently reverted.
+reduction (removal of opensky, FRED, Comtrade, Port of LA, the lag_adjuster
+normalizer step, and the later legacy-data purge of FRED/Comtrade/air rows
+plus the flight_events archive/_build_air_features removal). Each test
+should go red if the corresponding removal is ever silently reverted.
 """
 
 from __future__ import annotations
 
 import ast
+import os
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+_EXCLUDED_DIR_PARTS = {"venv", ".venv", ".git", "__pycache__", "node_modules"}
+
+
+def _repo_py_files() -> list[Path]:
+    return [
+        p for p in REPO_ROOT.rglob("*.py")
+        if not (_EXCLUDED_DIR_PARTS & set(p.parts))
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -141,3 +154,110 @@ def test_requirements_excludes_playwright():
     `pip freeze > requirements.txt` would silently re-add it otherwise."""
     text = (REPO_ROOT / "requirements.txt").read_text().lower()
     assert "playwright" not in text, "playwright is still listed in requirements.txt"
+
+
+# ---------------------------------------------------------------------------
+# Legacy data purge (2026-08-03) — _build_air_features / flight_events removed,
+# FRED.*/COMTRADE.*/air.* rows purged from features/signals.
+# ---------------------------------------------------------------------------
+
+def test_no_air_feature_builder():
+    """normalizer.feature_builder must not re-grow an air-feature builder
+    without also re-adding a real ingest source (flight_events is archived,
+    not a live table)."""
+    from normalizer import feature_builder
+
+    matches = [name for name in dir(feature_builder) if "air_features" in name.lower()]
+    assert not matches, (
+        f"normalizer.feature_builder has air-feature-builder attribute(s) {matches!r} — "
+        "flight_events was archived on 2026-08-03; this needs a real ingest source, "
+        "not just a resurrected function"
+    )
+
+
+def _docstring_line_ranges(tree: ast.AST) -> list[tuple[int, int]]:
+    """(start, end) line ranges of real docstrings (module/function/class first
+    statement) — as opposed to arbitrary triple-quoted strings used as SQL."""
+    ranges = []
+    nodes: list[ast.AST] = [tree] + [
+        n for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    ]
+    for node in nodes:
+        body = getattr(node, "body", None)
+        if not body:
+            continue
+        first = body[0]
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            ranges.append((first.lineno, first.value.end_lineno))
+    return ranges
+
+
+def test_flight_events_not_referenced():
+    """No live code path may reference the old `flight_events` table name —
+    it was renamed to flight_events_archived_20260803 on 2026-08-03. Comments
+    and docstrings that mention it historically are fine; this only flags
+    real code (e.g. a SQL string in a text() call, or a bare identifier)."""
+    violations: list[str] = []
+    for py_file in _repo_py_files():
+        if "tests" in py_file.parts:
+            continue
+        source = py_file.read_text()
+        try:
+            tree = ast.parse(source, filename=str(py_file))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+
+        doc_ranges = _docstring_line_ranges(tree)
+        for i, line in enumerate(source.splitlines(), start=1):
+            if "flight_events" not in line:
+                continue
+            if any(start <= i <= end for start, end in doc_ranges):
+                continue
+            if line.strip().startswith("#"):
+                continue
+            violations.append(f"{py_file.relative_to(REPO_ROOT)}:{i}: {line.strip()}")
+
+    assert not violations, (
+        "code still references the old `flight_events` table name (renamed to "
+        "flight_events_archived_20260803 on 2026-08-03):\n" + "\n".join(violations)
+    )
+
+
+def test_purged_features_absent():
+    """No FRED.*/COMTRADE.*/air.* rows should remain in `features` after the
+    2026-08-03 purge. Skips (not fails) if DATABASE_URL is unreachable, same
+    pattern as the unique-key contract test."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+        from sqlalchemy import create_engine, text
+    except ImportError:
+        pytest.skip("sqlalchemy/dotenv not installed — skipping live-DB purge check")
+
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        pytest.skip("DATABASE_URL is not set — skipping live-DB purge check")
+
+    try:
+        engine = create_engine(database_url)
+        with engine.connect() as conn:
+            count = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM features "
+                    "WHERE feature_name LIKE 'FRED.%' "
+                    "OR feature_name LIKE 'COMTRADE.%' "
+                    "OR feature_name LIKE 'air.%'"
+                )
+            ).scalar()
+    except Exception as exc:
+        pytest.skip(f"Database unreachable at DATABASE_URL — skipping ({exc})")
+
+    assert count == 0, (
+        f"found {count} FRED.*/COMTRADE.*/air.* rows still in `features` — "
+        "expected the 2026-08-03 purge to have removed all of them"
+    )

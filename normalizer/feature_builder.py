@@ -20,7 +20,6 @@ filter with simple LIKE patterns:
     port.<UNLOCODE>.<metric>
     BDI.<metric>
     WCI.<metric>
-    air.cargo_flights.<origin>_<dest>
 
 z_score is computed over a rolling 90-day window so all features land on
 a comparable scale regardless of their native units.
@@ -82,28 +81,6 @@ def _fetch_port_daily(session) -> pd.DataFrame:
         "container_count", "bulk_count", "tanker_count",
         "arrivals", "departures",
     ])
-
-
-def _fetch_cargo_routes(session) -> pd.DataFrame:
-    """Daily cargo-flight count per (origin_icao, dest_icao) pair."""
-    rows = session.execute(
-        text(
-            """
-            SELECT DATE(departed_at) AS date,
-                   origin_icao, dest_icao,
-                   COUNT(*)          AS flights
-            FROM flight_events
-            WHERE cargo_flag IS TRUE
-              AND origin_icao IS NOT NULL
-              AND dest_icao   IS NOT NULL
-            GROUP BY 1, 2, 3
-            ORDER BY 1
-            """
-        )
-    ).fetchall()
-    if not rows:
-        return pd.DataFrame(columns=["date", "origin_icao", "dest_icao", "flights"])
-    return pd.DataFrame(rows, columns=["date", "origin_icao", "dest_icao", "flights"])
 
 
 # ── Feature assembly ─────────────────────────────────────────────────────────
@@ -199,20 +176,6 @@ def _build_bench_features(session, bag: list[dict]) -> None:
         _add_feature(bag, name, daily)
 
 
-def _build_air_features(session, bag: list[dict]) -> None:
-    df = _fetch_cargo_routes(session)
-    if df.empty:
-        return
-    for (origin, dest), sub in df.groupby(["origin_icao", "dest_icao"]):
-        single = sub[["date", "flights"]].rename(
-            columns={"date": "ts", "flights": "value"}
-        )
-        daily = to_daily(single, agg="sum")
-        name = f"air.cargo_flights.{origin}_{dest}"
-        adjusted, was = deseasonalize(daily)
-        _add_feature(bag, name, adjusted, deseasonalized=was)
-
-
 # ── Persistence ──────────────────────────────────────────────────────────────
 
 _UPSERT_SQL = text(
@@ -251,7 +214,6 @@ def build() -> int:
     with Session() as s:
         _build_port_features(s, bag)
         _build_bench_features(s, bag)
-        _build_air_features(s, bag)
     n = _write(bag)
     logger.info("feature_builder: %d feature rows upserted", n)
     return n
