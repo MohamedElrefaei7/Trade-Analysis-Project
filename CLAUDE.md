@@ -110,6 +110,16 @@ No SQL, no Streamlit imports — the whole module is dataclasses + `numpy` +
 `pandas` over DataFrames the caller passes in. That's what lets its four
 detectors be unit-tested with synthetic frames instead of a live database.
 
+### `schema.sql` is a historical artifact — it is never re-applied
+
+Schema changes ship as additive migration files, not as edits to
+`schema.sql` followed by a re-run. `schema.sql` records the `CREATE`
+statements as they were run once, at project start, and is kept for
+reference — what the base schema looked like — not as an install script. A
+fresh database is provisioned by restoring a dump, never by piping
+`schema.sql` into `psql`. See § 7 for why re-running it against a populated
+database is actively unsafe, not just redundant.
+
 ---
 
 ## 4. Conventions
