@@ -225,3 +225,23 @@ raises `SystemExit` if not. Without this check, Prefect's `serve()` would
 silently spawn an ephemeral in-process server on a random port — the
 scheduler would appear to start fine, but every flow run would be detached
 from persistent history and vanish on restart.
+
+---
+
+## 8. Infrastructure (`infra/terraform/`)
+
+The AWS footprint (EC2 instance, security group, Elastic IP, persistent
+data EBS volume) is defined in `infra/terraform/` — see that directory's
+`README.md` for apply order and state-backup instructions. As a contract:
+
+- **The data EBS volume is never destroyed by tooling.** It holds AIS
+  position history that cannot be re-collected. It carries
+  `lifecycle { prevent_destroy = true }`; only a human, deliberately,
+  detaches or deletes it — never an automated script, never a routine
+  `terraform apply`.
+- **The instance is replaceable.** Unlike the data volume, the instance
+  itself has no `prevent_destroy` — it's meant to be rebuildable from the
+  Terraform config plus the (separately maintained) provisioning scripts.
+- **`terraform destroy` is never run against this configuration.** If
+  deprovisioning is ever needed, it's a manual, resource-by-resource
+  decision, not a single command.

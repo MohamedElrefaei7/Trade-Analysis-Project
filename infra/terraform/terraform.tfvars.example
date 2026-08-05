@@ -1,0 +1,18 @@
+# Copy this file to terraform.tfvars and fill in real values.
+# terraform.tfvars is gitignored — never commit it.
+
+aws_region = "us-east-1"
+vpc_id     = "vpc-00000000000000000"
+subnet_id  = "subnet-00000000000000000"
+
+# CIDR allowed to SSH in. Use your own IP/32, never 0.0.0.0/0.
+admin_cidr = "203.0.113.4/32"
+
+# Contents of your public key file, e.g. `cat ~/.ssh/id_ed25519.pub`.
+ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleExampleExampleExampleExample operator@example.com"
+
+# Optional overrides — sensible defaults live in variables.tf.
+instance_type = "t4g.medium"
+# root_volume_size_gb = 20
+# data_volume_size_gb = 30
+# project_name        = "trade-signals"
