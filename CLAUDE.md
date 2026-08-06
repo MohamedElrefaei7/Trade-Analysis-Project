@@ -245,3 +245,39 @@ data EBS volume) is defined in `infra/terraform/` — see that directory's
 - **`terraform destroy` is never run against this configuration.** If
   deprovisioning is ever needed, it's a manual, resource-by-resource
   decision, not a single command.
+
+### OS provisioning (`provision/`)
+
+Idempotent scripts, run by the operator via `provision/install.sh`, turn
+the Terraform-defined instance into a hardened Docker host — see
+`provision/README.md` for run order and done-condition checks. As a
+contract:
+
+- **The data volume is referenced by UUID everywhere** — `/etc/fstab`,
+  operator documentation, everything — never by device path (`/dev/sdf`,
+  `/dev/nvme1n1`). Nitro device enumeration isn't guaranteed stable across
+  reboots or instance-type changes; the UUID, read via `blkid` after
+  formatting, is the only stable handle.
+- **Finding the volume in the first place is also identity-based, not
+  positional.** `provision/02-mount-data-volume.sh` requires
+  `DATA_VOLUME_ID` (the real `aws_ebs_volume.data` ID, from
+  `terraform output -raw data_volume_id`) and matches it against the NVMe
+  controller's serial number — Nitro exposes the actual EBS volume ID
+  there, readable from sysfs with no AWS API access needed. There is no
+  fallback to "whichever disk isn't root": that was tried and removed —
+  it only ever got exercised in the anomalous cases (an extra volume
+  attached, a snapshot restore in progress) where a topology-based guess
+  is most likely to be wrong.
+- **ufw governs 80/tcp and 443/tcp only.** SSH access is entirely a
+  Terraform/security-group concern (`admin_cidr` in
+  `infra/terraform/network.tf`) — `provision/00-harden.sh` never adds an
+  SSH rule to ufw. Two independent places to manage port 22 is how a
+  security group correctly scoped to one IP ends up paired with a ufw
+  rule open to the world, unnoticed because the security group is still
+  doing its job.
+- **`iptables -L DOCKER-USER -n` — not `ufw status` — is the source of
+  truth for what's actually reachable through Docker.** Docker
+  manipulates iptables directly, ahead of ufw's own rules, so a container
+  that publishes a port is reachable regardless of what ufw reports.
+  `provision/03-docker-user-chain.sh` installs an explicit default-deny in
+  `DOCKER-USER`, reinstalled on every boot via systemd.
