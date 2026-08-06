@@ -28,11 +28,18 @@ apt-get install -y -qq ufw fail2ban unattended-upgrades
 
 echo "[00-harden] configuring ufw (80/tcp + 443/tcp only — no SSH rule, see header)..."
 
-# IPv6 disabled in ufw itself (not the OS) so `ufw allow 80/tcp` doesn't
-# produce a second "(v6)" ALLOW line per port — tests/test_provision.sh
-# asserts exactly two ALLOW lines total.
-if [[ -f /etc/default/ufw ]] && grep -q '^IPV6=yes' /etc/default/ufw; then
-  sed -i 's/^IPV6=yes/IPV6=no/' /etc/default/ufw
+# IPv6 stays enabled in ufw. An earlier version of this script disabled it
+# here so `ufw allow 80/tcp` wouldn't also produce a "(v6)" ALLOW line,
+# purely to make a rule-count assertion in tests/test_provision.sh come
+# out to two instead of four. That was fixing the environment to make an
+# easy count pass rather than fixing the check to verify the actual
+# invariant (80/443 only, nothing else) — and it cost real capability:
+# Phase 10 needs IPv6 working at the OS level for Let's Encrypt and any
+# future AAAA record. The test now filters to v4 before counting and
+# separately checks v4/v6 parity, so ufw allowing both address families
+# is expected and correct.
+if [[ -f /etc/default/ufw ]] && grep -q '^IPV6=no' /etc/default/ufw; then
+  sed -i 's/^IPV6=no/IPV6=yes/' /etc/default/ufw
 fi
 
 ufw default deny incoming

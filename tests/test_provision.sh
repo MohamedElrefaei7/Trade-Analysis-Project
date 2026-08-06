@@ -46,14 +46,21 @@ test_ufw_default_deny_incoming() {
   ufw status verbose | grep -q "Default: deny (incoming)"
 }
 
-# Exactly two ALLOW lines in ufw status, ports 80 and 443, nothing else.
-# Fails if port 22 or anything else gets added to ufw directly — catches
-# the SSH-stays-in-the-security-group boundary being violated.
-test_ufw_exactly_two_allow_rules() {
-  local allow_count port_rules
-  allow_count="$(ufw status | grep -cE 'ALLOW')"
-  port_rules="$(ufw status | grep -cE '^(80|443)/tcp[[:space:]]+ALLOW')"
-  [[ "$allow_count" -eq 2 && "$port_rules" -eq 2 ]]
+# The actual invariant is "ufw allows only 80 and 443, never 22" — not
+# "ufw has exactly two ALLOW lines," which is merely a proxy that happens
+# to equal two only when IPv6 is disabled. IPv6 stays enabled (see
+# 00-harden.sh), so ufw is expected to list v6 mirrors of the same two
+# rules; this filters to v4-only ALLOW lines and asserts their ports are
+# exactly {80, 443}, then separately asserts the v6 ALLOW lines are the
+# same two ports — that second half is what actually catches port 22 (or
+# anything else) sneaking in via the IPv6 side specifically, which a
+# v4-only filter alone would be blind to.
+test_ufw_v4_allow_rules_are_80_and_443() {
+  local v4_ports v6_ports
+  v4_ports="$(ufw status | grep 'ALLOW' | grep -v '(v6)' | awk '{print $1}' | sed 's#/tcp##' | sort -n | tr '\n' ' ')"
+  v6_ports="$(ufw status | grep 'ALLOW' | grep '(v6)' | awk '{print $1}' | sed 's#/tcp##' | sort -n | tr '\n' ' ')"
+  [[ "$v4_ports" == "80 443 " ]] || return 1
+  [[ "$v6_ports" == "80 443 " ]] || return 1
 }
 
 # iptables -L DOCKER-USER -n shows a terminal DROP/REJECT rule for
@@ -114,7 +121,7 @@ echo
 
 for t in \
   test_ufw_default_deny_incoming \
-  test_ufw_exactly_two_allow_rules \
+  test_ufw_v4_allow_rules_are_80_and_443 \
   test_docker_user_chain_default_deny \
   test_data_volume_mounted_by_uuid \
   test_data_volume_not_reformatted_on_rerun \
