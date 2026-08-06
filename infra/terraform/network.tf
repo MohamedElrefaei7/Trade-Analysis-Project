@@ -32,8 +32,10 @@ resource "aws_vpc_security_group_ingress_rule" "ssh" {
 # is ever allowed in this security group (test_infra.py enforces this as a
 # guardrail against, e.g., accidentally exposing the Streamlit default
 # port or Postgres).
-#
-# No explicit egress rule resource either: AWS auto-creates an "allow all
-# outbound" rule when a security group is first created, so outbound
-# package installs and the AISStream websocket connection work without
-# Terraform having to manage one.
+
+resource "aws_vpc_security_group_egress_rule" "all" {
+  security_group_id = aws_security_group.trade_signals.id
+  cidr_ipv4          = "0.0.0.0/0"
+  ip_protocol         = "-1"  # all protocols, all ports
+  description         = "Allow all outbound"
+}
