@@ -29,6 +29,7 @@ resource "aws_instance" "trade_signals" {
   subnet_id              = var.subnet_id
   vpc_security_group_ids = [aws_security_group.trade_signals.id]
   key_name               = aws_key_pair.trade_signals.key_name
+  iam_instance_profile   = aws_iam_instance_profile.ssm.name
 
   root_block_device {
     volume_size           = var.root_volume_size_gb

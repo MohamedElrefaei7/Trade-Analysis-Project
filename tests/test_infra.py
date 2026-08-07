@@ -186,3 +186,49 @@ def test_root_volume_smaller_than_data_volume(tf):
         f"data_volume_size_gb default ({data_size}) — consolidating onto a single, "
         "larger root volume is the failure mode this guards against"
     )
+
+
+# ---------------------------------------------------------------------------
+# test_instance_has_ssm_instance_profile
+# ---------------------------------------------------------------------------
+
+
+def test_instance_has_ssm_instance_profile(tf):
+    instances = _resources(tf, "aws_instance")
+    (instance,) = instances.values()
+    profile_ref = instance.get("iam_instance_profile")
+    assert profile_ref, "aws_instance.trade_signals is missing iam_instance_profile"
+
+    profiles = _resources(tf, "aws_iam_instance_profile")
+    assert profiles, "expected an aws_iam_instance_profile resource in iam.tf"
+    (profile_name,) = profiles.keys()
+    assert profile_ref == f"${{aws_iam_instance_profile.{profile_name}.name}}", (
+        f"aws_instance.trade_signals.iam_instance_profile ({profile_ref!r}) must "
+        f"reference aws_iam_instance_profile.{profile_name} by name, not a literal "
+        "string — otherwise Terraform can't detect drift between the two"
+    )
+
+
+# ---------------------------------------------------------------------------
+# test_ssm_role_uses_managed_policy
+# ---------------------------------------------------------------------------
+
+
+def test_ssm_role_uses_managed_policy(tf):
+    managed_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+
+    attachments = _resources(tf, "aws_iam_role_policy_attachment")
+    matches = [attrs for attrs in attachments.values() if attrs.get("policy_arn") == managed_arn]
+    assert matches, (
+        f"expected an aws_iam_role_policy_attachment referencing {managed_arn!r} — "
+        "AWS maintains this policy's permissions as SSM's requirements evolve; an "
+        "inline copy would freeze them at whatever existed the day it was written"
+    )
+
+    inline_policies = _resources(tf, "aws_iam_role_policy")
+    for name, attrs in inline_policies.items():
+        policy_text = str(attrs.get("policy", ""))
+        assert "AmazonSSMManagedInstanceCore" not in policy_text, (
+            f"aws_iam_role_policy.{name!r} embeds AmazonSSMManagedInstanceCore inline "
+            "— it must be an aws_iam_role_policy_attachment instead"
+        )

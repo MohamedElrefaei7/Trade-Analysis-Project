@@ -245,6 +245,8 @@ data EBS volume) is defined in `infra/terraform/` — see that directory's
 - **`terraform destroy` is never run against this configuration.** If
   deprovisioning is ever needed, it's a manual, resource-by-resource
   decision, not a single command.
+- **The instance's SSM access is defined in Terraform (`iam.tf`), not a
+  manual console step.**
 
 ### OS provisioning (`provision/`)
 
