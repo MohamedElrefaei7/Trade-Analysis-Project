@@ -268,13 +268,21 @@ contract:
   it only ever got exercised in the anomalous cases (an extra volume
   attached, a snapshot restore in progress) where a topology-based guess
   is most likely to be wrong.
-- **ufw governs 80/tcp and 443/tcp only.** SSH access is entirely a
-  Terraform/security-group concern (`admin_cidr` in
-  `infra/terraform/network.tf`) — `provision/00-harden.sh` never adds an
-  SSH rule to ufw. Two independent places to manage port 22 is how a
-  security group correctly scoped to one IP ends up paired with a ufw
-  rule open to the world, unnoticed because the security group is still
-  doing its job.
+- **ufw governs 22/tcp (scoped to `ADMIN_CIDR`), 80/tcp, and 443/tcp.**
+  The security group and ufw are both gates in series, not redundant
+  alternatives — traffic must clear both to reach the instance. ufw's
+  `default deny incoming` applies independently of the security group, so
+  with no ufw rule for 22, SSH is unreachable at the OS level the moment
+  ufw activates, regardless of what the security group permits. This was
+  discovered live: an earlier version of `provision/00-harden.sh` opened
+  only 80/tcp and 443/tcp on the theory that the security group already
+  handled port 22, and the first real `install.sh` run locked out SSH
+  immediately, recovered only via SSM Session Manager — see CONTEXT.md.
+  `00-harden.sh` now requires an `ADMIN_CIDR` env var (no default, same
+  pattern as `DATA_VOLUME_ID`) sourced from the same Terraform
+  `admin_cidr` value the security group rule already uses, and scopes
+  ufw's SSH rule to it — never a bare `ufw allow 22`, which would open
+  SSH to the world regardless of what the security group restricts.
 - **`iptables -L DOCKER-USER -n` — not `ufw status` — is the source of
   truth for what's actually reachable through Docker.** Docker
   manipulates iptables directly, ahead of ufw's own rules, so a container

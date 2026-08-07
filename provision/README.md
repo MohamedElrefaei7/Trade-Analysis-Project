@@ -30,24 +30,36 @@ rerunnable, not silent and one-shot.
   ```
   This stays an operator-supplied value — `install.sh` never reaches into
   AWS credentials or calls the AWS API to look it up itself.
+- `ADMIN_CIDR` — the same CIDR as Terraform's `var.admin_cidr`, required
+  with no default. It isn't a Terraform output (it's an input), so read it
+  straight from `infra/terraform/terraform.tfvars`:
+  ```sh
+  grep admin_cidr infra/terraform/terraform.tfvars
+  ```
+  `00-harden.sh` uses this to scope ufw's SSH rule — see "Two independent
+  firewall layers" below for why this can't default to anything, and
+  especially can't default to open.
 
 ## What to run, in what order
 
 ```sh
 cd trade-signals   # this checkout
 export DATA_VOLUME_ID=vol-0123456789abcdef0   # from terraform output, see above
+export ADMIN_CIDR=203.0.113.4/32              # from terraform.tfvars, see above
 sudo -E provision/install.sh
 ```
 
-(`sudo -E` — or otherwise arrange for `DATA_VOLUME_ID` to survive the
-`sudo`, e.g. `sudo DATA_VOLUME_ID="$DATA_VOLUME_ID" provision/install.sh`.
-`install.sh` fails immediately, before touching anything, if the variable
-isn't set.)
+(`sudo -E` — or otherwise arrange for `DATA_VOLUME_ID` and `ADMIN_CIDR` to
+survive the `sudo`, e.g.
+`sudo DATA_VOLUME_ID="$DATA_VOLUME_ID" ADMIN_CIDR="$ADMIN_CIDR" provision/install.sh`.
+`install.sh` fails immediately, before touching anything, if either
+variable isn't set.)
 
 `install.sh` runs, in order:
 
-1. `00-harden.sh` — ufw (80/tcp + 443/tcp only, see below), fail2ban,
-   unattended-upgrades, a 2 GB swapfile at `vm.swappiness=10`.
+1. `00-harden.sh` — ufw (22/tcp scoped to `ADMIN_CIDR`, 80/tcp, 443/tcp;
+   see below), fail2ban, unattended-upgrades, a 2 GB swapfile at
+   `vm.swappiness=10`.
 2. `01-docker.sh` — Docker Engine + Compose plugin, `deploy` user created
    and added to the `docker` group (not given passwordless sudo — see
    CLAUDE.md §8).
@@ -70,16 +82,27 @@ etc.) — `install.sh` is a thin, ordered wrapper, not the only entry point.
 Rerunning `install.sh` in full is safe: every step checks current state
 before acting.
 
-## Two independent firewall layers — read this before troubleshooting connectivity
+## Two firewall layers, in series — read this before troubleshooting connectivity
 
-- **ufw governs 80/tcp and 443/tcp only.** SSH access is entirely a
-  Terraform/security-group concern (`infra/terraform/network.tf`, scoped
-  to `admin_cidr`) — `00-harden.sh` never adds an SSH rule to ufw.
-  `ufw status` should show exactly two ALLOW rules, ports 80 and 443,
-  nothing else. If you find yourself wanting to `ufw allow 22`, don't —
-  that's how a security group correctly scoped to one IP ends up paired
-  with a ufw rule open to the world, silently, because the security group
-  is still doing its job and nobody checks ufw too.
+- **The security group and ufw are both gates traffic must clear, not
+  redundant alternatives to each other.** It's tempting to think "the
+  security group already restricts port 22, so ufw doesn't need to" —
+  that's wrong. ufw's `default deny incoming` applies independently of
+  the security group, so with no ufw rule for 22, SSH is unreachable at
+  the OS level the moment ufw activates, regardless of what the security
+  group permits. This was discovered live: an earlier version of
+  `00-harden.sh` opened only 80/tcp and 443/tcp, and the first real
+  `install.sh` run on a fresh instance locked out SSH immediately,
+  recovered only via SSM Session Manager. See CONTEXT.md for the dated
+  log entry.
+- **ufw governs 22/tcp (scoped to `ADMIN_CIDR`), 80/tcp, and 443/tcp.**
+  `00-harden.sh` requires `ADMIN_CIDR` — the same value as Terraform's
+  `var.admin_cidr` — and adds a ufw rule for port 22 scoped to exactly
+  that CIDR, never bare `ufw allow 22` (which would open SSH to the world
+  regardless of what the security group restricts, defeating the reason
+  `admin_cidr` exists in the first place). `ufw status` should show a
+  22/tcp ALLOW rule scoped to your admin IP, plus 80 and 443, nothing
+  wider.
 - **`DOCKER-USER` is the source of truth for what Docker exposes.** Docker
   manipulates iptables directly, ahead of ufw's own rules, so a container
   publishing a port (`docker run -p 5432:5432 ...`) is reachable
@@ -92,7 +115,7 @@ before acting.
 After `install.sh` completes:
 
 ```sh
-ufw status                                       # exactly 2 ALLOW rules: 80/tcp, 443/tcp
+ufw status                                       # 22/tcp ALLOW scoped to $ADMIN_CIDR, plus 80/tcp, 443/tcp
 su - deploy -c "docker compose version"          # succeeds, no sudo
 systemctl is-enabled trade-signals               # enabled
 findmnt /mnt/trade-signals-data                  # mounted
@@ -101,10 +124,12 @@ iptables -L DOCKER-USER -n                       # terminal DROP past 80/443/est
 ```
 
 Run the full suite with `sudo -E tests/test_provision.sh` (`DATA_VOLUME_ID`
-must still be exported — the harness reruns `install.sh` as part of
-`test_data_volume_not_reformatted_on_rerun`). See that file — it's a
-harness run on the instance itself, not something CI can run, since it
-asserts against live system state.
+and `ADMIN_CIDR` must still be exported — the harness reruns `install.sh`
+as part of `test_data_volume_not_reformatted_on_rerun`, and checks the
+ufw SSH rule against `ADMIN_CIDR` directly in
+`test_ufw_allows_ssh_from_admin_cidr`). See that file — it's a harness run
+on the instance itself, not something CI can run, since it asserts
+against live system state.
 
 ## Reboot verification
 

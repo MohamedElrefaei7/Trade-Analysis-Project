@@ -31,6 +31,14 @@ fi
 # header for why this replaced disk-position/count-based identification.
 : "${DATA_VOLUME_ID:?DATA_VOLUME_ID is required — see provision/README.md}"
 
+# Hard-required, no default: the same CIDR already used by Terraform's
+#   var.admin_cidr (infra/terraform/network.tf's security group SSH rule)
+# Checked up front, same as DATA_VOLUME_ID above, so a missing value halts
+# before 00-harden.sh runs rather than completing "successfully" while
+# leaving SSH unreachable — see that script's header for the incident this
+# guards against.
+: "${ADMIN_CIDR:?ADMIN_CIDR is required — see provision/README.md}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEPLOY_USER="${DEPLOY_USER:-deploy}"
@@ -38,7 +46,7 @@ DEPLOY_DIR="${DEPLOY_DIR:-$REPO_ROOT}"
 MOUNT_POINT="${MOUNT_POINT:-/mnt/trade-signals-data}"
 
 echo "== 00-harden =="
-bash "$SCRIPT_DIR/00-harden.sh"
+ADMIN_CIDR="$ADMIN_CIDR" bash "$SCRIPT_DIR/00-harden.sh"
 
 echo "== 01-docker =="
 DEPLOY_USER="$DEPLOY_USER" bash "$SCRIPT_DIR/01-docker.sh"
@@ -59,7 +67,7 @@ systemctl enable trade-signals >/dev/null
 cat <<EOF
 
 install.sh complete. Verify:
-  ufw status verbose                             # Default: deny (incoming); ALLOW 80/tcp, 443/tcp only
+  ufw status verbose                             # Default: deny (incoming); ALLOW 22/tcp (from \$ADMIN_CIDR), 80/tcp, 443/tcp
   su - $DEPLOY_USER -c "docker compose version"  # no sudo needed
   systemctl is-enabled trade-signals             # enabled
   findmnt $MOUNT_POINT                           # data volume mounted

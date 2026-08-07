@@ -21,6 +21,11 @@ fi
 # install.sh, which itself hard-requires this — see provision/README.md.
 : "${DATA_VOLUME_ID:?DATA_VOLUME_ID is required — see provision/README.md}"
 
+# Required (no default): test_ufw_allows_ssh_from_admin_cidr checks the ufw
+# rule against this value, and test_data_volume_not_reformatted_on_rerun's
+# install.sh rerun hard-requires it too — see provision/README.md.
+: "${ADMIN_CIDR:?ADMIN_CIDR is required — see provision/README.md}"
+
 MOUNT_POINT="${MOUNT_POINT:-/mnt/trade-signals-data}"
 DEPLOY_USER="${DEPLOY_USER:-deploy}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -46,21 +51,41 @@ test_ufw_default_deny_incoming() {
   ufw status verbose | grep -q "Default: deny (incoming)"
 }
 
-# The actual invariant is "ufw allows only 80 and 443, never 22" — not
-# "ufw has exactly two ALLOW lines," which is merely a proxy that happens
-# to equal two only when IPv6 is disabled. IPv6 stays enabled (see
-# 00-harden.sh), so ufw is expected to list v6 mirrors of the same two
-# rules; this filters to v4-only ALLOW lines and asserts their ports are
-# exactly {80, 443}, then separately asserts the v6 ALLOW lines are the
-# same two ports — that second half is what actually catches port 22 (or
+# The actual invariant is "ufw allows only 22 (SSH, scoped to ADMIN_CIDR),
+# 80, and 443, nothing wider" — not "ufw has exactly N ALLOW lines," which
+# is merely a proxy that happens to equal a fixed count only when IPv6 is
+# disabled. IPv6 stays enabled (see 00-harden.sh), so ufw is expected to
+# list v6 mirrors of 80/443 — but NOT of 22, since ADMIN_CIDR (from
+# Terraform's admin_cidr) is IPv4-only and no v6 SSH rule is ever added.
+# This filters to v4-only ALLOW lines and asserts their ports are exactly
+# {22, 80, 443}, then separately asserts the v6 ALLOW lines are exactly
+# {80, 443} — that second half is what actually catches port 22 (or
 # anything else) sneaking in via the IPv6 side specifically, which a
-# v4-only filter alone would be blind to.
-test_ufw_v4_allow_rules_are_80_and_443() {
+# v4-only filter alone would be blind to. This test only checks *which
+# ports* are open, not *who* they're scoped to — the "not Anywhere" scoping
+# check for port 22 lives in test_ufw_allows_ssh_from_admin_cidr below.
+test_ufw_v4_allow_rules_are_22_80_and_443() {
   local v4_ports v6_ports
   v4_ports="$(ufw status | grep 'ALLOW' | grep -v '(v6)' | awk '{print $1}' | sed 's#/tcp##' | sort -n | tr '\n' ' ')"
   v6_ports="$(ufw status | grep 'ALLOW' | grep '(v6)' | awk '{print $1}' | sed 's#/tcp##' | sort -n | tr '\n' ' ')"
-  [[ "$v4_ports" == "80 443 " ]] || return 1
+  [[ "$v4_ports" == "22 80 443 " ]] || return 1
   [[ "$v6_ports" == "80 443 " ]] || return 1
+}
+
+# ufw's default-deny-incoming applies in series with the security group,
+# not as a redundant alternative to it — with no ufw rule for 22, SSH is
+# unreachable at the OS level the instant the firewall activates,
+# regardless of what the security group permits. This asserts a 22/tcp
+# ALLOW rule exists scoped to $ADMIN_CIDR specifically (not "Anywhere"),
+# since a wide-open ufw rule would defeat the whole reason the security
+# group's admin_cidr scoping exists. See CLAUDE.md §8.
+test_ufw_allows_ssh_from_admin_cidr() {
+  local admin_host="${ADMIN_CIDR%%/*}"
+  local v4_ssh_allow
+  v4_ssh_allow="$(ufw status | grep -E '^22/tcp[[:space:]]+ALLOW' | grep -v '(v6)')"
+  [[ -n "$v4_ssh_allow" ]] || return 1
+  echo "$v4_ssh_allow" | grep -qF "$admin_host" || return 1
+  ! echo "$v4_ssh_allow" | grep -q 'Anywhere'
 }
 
 # iptables -L DOCKER-USER -n shows a terminal DROP/REJECT rule for
@@ -121,7 +146,8 @@ echo
 
 for t in \
   test_ufw_default_deny_incoming \
-  test_ufw_v4_allow_rules_are_80_and_443 \
+  test_ufw_v4_allow_rules_are_22_80_and_443 \
+  test_ufw_allows_ssh_from_admin_cidr \
   test_docker_user_chain_default_deny \
   test_data_volume_mounted_by_uuid \
   test_data_volume_not_reformatted_on_rerun \

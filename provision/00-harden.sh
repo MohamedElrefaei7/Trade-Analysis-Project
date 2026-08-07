@@ -6,15 +6,21 @@
 # checks current state before acting, so reruns only do the work that's
 # still outstanding.
 #
-# ufw here governs 80/tcp and 443/tcp ONLY. SSH ingress stays entirely in
-# Terraform's security group (infra/terraform/network.tf, scoped to
-# var.admin_cidr) — this script deliberately does NOT add an SSH rule to
-# ufw. Two independent places to manage port 22 is how you eventually get
-# a security group correctly scoped to a /32 while ufw simultaneously
-# permits it from anywhere, and nobody notices because the security group
-# is still doing its job. ufw's default-deny-incoming already blocks 22
-# with no explicit rule needed; OpenSSH's ufw app profile is deliberately
-# left untouched. See CLAUDE.md §8 for the full rationale.
+# ufw here governs 22/tcp, 80/tcp, and 443/tcp. The security group
+# (infra/terraform/network.tf, scoped to var.admin_cidr) and ufw are both
+# gates in series, not redundant alternatives to each other — traffic has
+# to clear both to reach the instance. ufw's default-deny-incoming applies
+# independently of the security group, so with no ufw rule for 22, SSH is
+# unreachable at the OS level the moment the firewall activates, no matter
+# what the security group permits. (Discovered live: a version of this
+# script without the rule below locked out SSH the instant it ran,
+# recovered only via SSM Session Manager. See CONTEXT.md.)
+#
+# The SSH rule is scoped to $ADMIN_CIDR, a required env var with no
+# default (same pattern as DATA_VOLUME_ID in provision/install.sh) —
+# sourced from the same Terraform admin_cidr value the security group
+# rule already uses, never hardcoded here, so the two can't silently
+# drift apart. See CLAUDE.md §8.
 set -euo pipefail
 
 if [[ $EUID -ne 0 ]]; then
@@ -22,11 +28,13 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
+: "${ADMIN_CIDR:?ADMIN_CIDR is required — see provision/README.md}"
+
 echo "[00-harden] installing ufw, fail2ban, unattended-upgrades..."
 apt-get update -qq
 apt-get install -y -qq ufw fail2ban unattended-upgrades
 
-echo "[00-harden] configuring ufw (80/tcp + 443/tcp only — no SSH rule, see header)..."
+echo "[00-harden] configuring ufw (22/tcp scoped to \$ADMIN_CIDR, 80/tcp, 443/tcp)..."
 
 # IPv6 stays enabled in ufw. An earlier version of this script disabled it
 # here so `ufw allow 80/tcp` wouldn't also produce a "(v6)" ALLOW line,
@@ -45,6 +53,16 @@ fi
 ufw default deny incoming
 ufw default allow outgoing
 
+# Scoped to ADMIN_CIDR, never `ufw allow 22/tcp` bare — an unscoped rule
+# would open SSH to the world regardless of what the security group
+# restricts, defeating the reason admin_cidr exists. Checked against the
+# CIDR's host part specifically (not just "any 22/tcp ALLOW rule exists")
+# so a rerun after ADMIN_CIDR changes adds the new rule instead of no-op'ing
+# on a stale one scoped to the old value.
+ADMIN_HOST="${ADMIN_CIDR%%/*}"
+if ! ufw status | grep -E '^22/tcp[[:space:]]+ALLOW' | grep -v '(v6)' | grep -qF "$ADMIN_HOST"; then
+  ufw allow from "$ADMIN_CIDR" to any port 22 proto tcp
+fi
 if ! ufw status | grep -qE '^80/tcp[[:space:]]+ALLOW'; then
   ufw allow 80/tcp
 fi
