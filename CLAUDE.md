@@ -391,3 +391,79 @@ a large diff.
   the job ran and legitimately wrote nothing (e.g. a scraper with no new
   data to insert). `NULL` means the job didn't report a count at all.
   Collapsing either into the other loses a real, alertable distinction.
+
+---
+
+## 11. Scheduling (`worker/cadences.py`, `worker/main.py`)
+
+`worker/cadences.py::CADENCES` is the single source of truth for both how
+each job in `orchestration/tasks.py::JOBS` is triggered and how long it
+may go without a successful run before it's overdue — one `Cadence` entry
+per job carries both `trigger` and `max_age`. The eventual Phase 11
+heartbeat imports this module and reads `max_age` from it; it never
+restates an expected age of its own. This project already has the worked
+example of what happens when those two facts live in separate places:
+`wci-weekly` read as stale for two and a half months because a freshness
+check that didn't know WCI's own cadence couldn't tell "overdue" from
+"its Friday hasn't come yet." `max_age` is set well above its job's
+interval (roughly 1.25×) specifically so a job that's merely mid-run
+isn't flagged overdue.
+
+- **The scheduler uses a `SQLAlchemyJobStore` (same Postgres database),
+  never APScheduler's default in-memory job store.** A restart is a new
+  process; an in-memory store remembers nothing about the previous
+  process's schedule, so on restart it computes a brand-new "now +
+  interval" `next_run_time` and never notices anything was missed at
+  all — coalesce and `misfire_grace_time` have nothing to act on if the
+  scheduler doesn't know a slot passed. This is not a hypothetical: the
+  first version of `worker/main.py` used the in-memory default and a live
+  restart-recovery verification produced *zero* catch-up runs, not one
+  (see CONTEXT.md, 2026-08-08). `build_scheduler()` also deliberately does
+  **not** re-`add_job()` a job that already has a persisted row —
+  `add_job(..., replace_existing=True)` recomputes `next_run_time` fresh
+  on every call, which would silently overwrite the persisted value (and
+  the fact that a slot was missed) on every restart; APScheduler's own
+  job-processing loop queries the jobstore for due jobs directly, so an
+  already-persisted job needs no re-registration to be picked up
+  correctly. Trade-off, stated plainly: a `cadences.py` change has no
+  effect on an already-persisted job until its stored row is cleared —
+  restart correctness was the point, not live config reload.
+- **Every job sets `coalesce=True` and `misfire_grace_time` explicitly —
+  never the library default.** APScheduler's own default grace is one
+  second; under that default, a fire time that passes while the process
+  is down is silently skipped and forgotten, which is the exact failure
+  this whole migration/worker effort exists to eliminate, re-created
+  inside the tool meant to fix it. Combined with the persistent job store
+  above, `coalesce=True` (collapse any backlog of missed fires into one)
+  and a grace roughly proportional to each job's own interval produce the
+  property that matters: **a restart after an outage catches every
+  overdue job up once, promptly — it does not wait for the job's next
+  naturally scheduled slot.** This is correct specifically because every
+  job in this pipeline recomputes from current database state rather than
+  consuming a per-slot increment; a future job that processes one
+  discrete slot per fire would silently lose work under `coalesce=True`
+  and needs its own judgment call, not this default.
+- **Every job sets `max_instances=1`.** A run that overruns into its own
+  next slot must queue, not overlap — two concurrent writers racing the
+  same upsert key is a race with no acceptable winner.
+- **All triggers, and the scheduler itself, are explicitly UTC.**
+  `CronTrigger`/`IntervalTrigger` default to the local timezone; the
+  container happens to run UTC today, but that's incidental, not
+  contracted — a base-image change or a stray `TZ` env var would silently
+  shift every schedule with no error anywhere. `timezone=` is passed
+  explicitly everywhere a trigger or scheduler is constructed.
+- **`job_runs.status` is one of `running` / `success` / `failed` /
+  `missed`** (`migrations/0002_job_runs_missed_status.sql` extended the
+  `CHECK`). `missed` means the fire time passed outside
+  `misfire_grace_time` and the `@job`-decorated function never ran at
+  all — APScheduler's executor skips the call entirely, so nothing in the
+  normal decorator path ever executes. `worker/main.py`'s
+  `EVENT_JOB_MISSED` listener is the only thing that makes this outcome
+  visible; without it, a misfire looks identical to "never scheduled."
+  `missed` is deliberately distinct from `failed` (the job didn't error —
+  it never ran) and must stay distinguishable from both.
+- **`worker/main.py` refuses to start if `CADENCES` and `JOBS` disagree.**
+  Checked at startup via a symmetric-difference comparison, before the
+  scheduler blocks — a job with no cadence would otherwise simply never
+  run, and a cadence naming no job would crash hours later at fire time,
+  in a log nobody's watching.

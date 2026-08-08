@@ -91,22 +91,32 @@ def _write_migration(migrations_dir: Path, filename: str, sql_text: str) -> Path
 # ---------------------------------------------------------------------------
 
 
+def _real_migration_filenames() -> list[str]:
+    """The actual migrations/ directory's .sql files, in application order —
+    computed rather than hardcoded so this file doesn't need editing every
+    time a new real migration is added (0002, 0003, ...)."""
+    return sorted(p.name for p in REAL_MIGRATIONS_DIR.iterdir() if p.suffix == ".sql")
+
+
 def test_runner_applies_pending_and_records_version(scratch_db):
+    expected = _real_migration_filenames()
+
     applied = run_migrations(scratch_db, migrations_dir=REAL_MIGRATIONS_DIR)
 
-    assert applied == ["0001_job_runs.sql"]
+    assert applied == expected
     assert _table_exists(scratch_db, "job_runs")
-    rows = _fetch_all(scratch_db, "SELECT version, filename FROM schema_migrations")
-    assert rows == [(1, "0001_job_runs.sql")]
+    rows = _fetch_all(scratch_db, "SELECT filename FROM schema_migrations ORDER BY version")
+    assert [r[0] for r in rows] == expected
 
 
 def test_runner_is_idempotent(scratch_db):
+    expected_count = len(_real_migration_filenames())
     run_migrations(scratch_db, migrations_dir=REAL_MIGRATIONS_DIR)
     second_run = run_migrations(scratch_db, migrations_dir=REAL_MIGRATIONS_DIR)
 
     assert second_run == []
     rows = _fetch_all(scratch_db, "SELECT version FROM schema_migrations")
-    assert len(rows) == 1
+    assert len(rows) == expected_count
 
 
 def test_runner_aborts_on_modified_applied_migration(scratch_db, tmp_path):
