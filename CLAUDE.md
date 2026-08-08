@@ -303,3 +303,47 @@ contract:
   that publishes a port is reachable regardless of what ufw reports.
   `provision/03-docker-user-chain.sh` installs an explicit default-deny in
   `DOCKER-USER`, reinstalled on every boot via systemd.
+
+---
+
+## 9. Schema migrations (`migrations/`)
+
+Schema changes ship as additive, numbered SQL files under `migrations/`
+(`NNNN_description.sql`), applied only by `orchestration/migrate.py` — see
+`migrations/README.md` for the runner's full behavior and rationale (why
+not Alembic, per-file transactions, zero-padded lexicographic ordering).
+
+- **An applied migration is never edited.** The runner records a sha256
+  checksum per applied file in `schema_migrations` and recomputes it on
+  every run; a mismatch aborts the run and names the file. A schema
+  change is always a new numbered file, never an edit to an old one.
+- **`schema.sql` is a historical artifact.** The runner explicitly
+  refuses to execute any file named `schema.sql`, anywhere under
+  `migrations/` — see § 7's "Never run `schema.sql` against a populated
+  database."
+- **`job_runs.status` is constrained to exactly `running` / `success` /
+  `failed`** by a `CHECK` constraint (`migrations/0001_job_runs.sql`),
+  not just application-level convention. The eventual Phase 11 heartbeat
+  queries `WHERE status = 'success'`; a typo'd status string fails at the
+  database instead of silently making every job look overdue — or,
+  worse, none.
+- **No code path deletes from `job_runs`.** `orchestration/jobs.py`'s
+  `@job` decorator only inserts a row once (`running`) and updates it in
+  place to its terminal status — application code never issues a
+  `DELETE FROM job_runs`. It is the audit trail for whether and how a job
+  actually ran; a silently-deleted row is indistinguishable from a job
+  that never ran at all, which is exactly the ambiguity the
+  `running`-row-first design (see `orchestration/jobs.py`'s docstring)
+  exists to rule out. Any future retention/cleanup need is an archival
+  policy (e.g. move rows older than N to a separate table), not a delete
+  in the application's own code path.
+
+  This is a rule about automated code paths, not a claim the table is
+  physically immutable. A human can still run a one-off `DELETE` by hand
+  for a stated, specific reason — e.g. rows known to be fabricated rather
+  than real job history (see CONTEXT.md, 2026-08-08) — same as `git
+  push --force` being forbidden by default doesn't mean no human ever
+  runs it. What's never acceptable is a script or a routine reaching for
+  `DELETE` to make the table match some other belief about what "should"
+  be true, or synthesizing a replacement row to paper over a gap instead
+  of just recording that the gap exists.
