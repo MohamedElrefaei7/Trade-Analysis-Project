@@ -186,7 +186,7 @@ INSERT INTO ports (unlocode, country, name, lat, lon, tier) VALUES
     ('GBFXT', 'GB', 'Felixstowe',        51.9642,    1.3419, 2),
     ('AEDXB', 'AE', 'Dubai (Jebel Ali)', 24.9857,   55.0272, 1);
 
--- ── DERIVED: Normalized feature table (Step 7 output) ────────────────────────
+-- ── DERIVED: Normalized feature table (Step 7 output) ───────────────────────
 -- Single wide-ish (date, feature_name, value) store consumed by the backtest
 -- layer. Produced nightly by the `normalizer` package. Raw tables are never
 -- mutated; everything here is re-derivable by re-running the normalizer.
