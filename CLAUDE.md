@@ -120,6 +120,18 @@ fresh database is provisioned by restoring a dump, never by piping
 `schema.sql` into `psql`. See § 7 for why re-running it against a populated
 database is actively unsafe, not just redundant.
 
+### A dump is verified by `pg_restore -f /dev/null`, not `--list` or a checksum
+
+A database dump is verified by `pg_restore -f /dev/null <file>` completing
+with no stderr output. `pg_restore --list` is not verification — it reads
+only the archive's table of contents, which sits at the head of the file.
+On 2026-08-07 a dump that was one-third its correct size, with unreadable
+data blocks, passed `--list` cleanly, matched its own SHA-256 across three
+machines, and failed on restore. Any script that produces or consumes a
+dump — including the Phase 11 nightly backup and its monthly restore test
+— verifies with `-f /dev/null` or it has not verified anything. Full
+diagnostic sequence in `CONTEXT.md`'s dated log entry.
+
 ---
 
 ## 4. Conventions
