@@ -2,26 +2,22 @@
 
 Idempotent shell scripts that turn a fresh Ubuntu 24.04 instance (as
 provisioned by `infra/terraform/`) into a hardened box with Docker, a
-non-root deploy user, the persistent data volume mounted, and a systemd
-unit stub ready for the real `docker-compose.yml` service definitions
-that later commits add. Not `user_data` — see `infra/terraform/README.md`
-and CLAUDE.md §8 for why: provisioning failures need to be visible and
-rerunnable, not silent and one-shot.
+non-root deploy user, the persistent data volume mounted, and the
+`docker-compose.yml` stack (TimescaleDB + Grafana) deployed at a fixed
+path and running under systemd. Not `user_data` — see
+`infra/terraform/README.md` and CLAUDE.md §8 for why: provisioning
+failures need to be visible and rerunnable, not silent and one-shot.
 
 ## Prerequisites
 
 - A running instance from `infra/terraform/` (Ubuntu 24.04 arm64,
   `t4g.medium`, with `aws_ebs_volume.data` attached).
-- This repo checked out on the instance — ideally as (or readable by) the
-  `deploy` user, e.g.:
-  ```sh
-  sudo -u deploy git clone <repo-url> /home/deploy/trade-signals
-  ```
-  (If `deploy` doesn't exist yet, clone anywhere `root` can read and rerun
-  after `01-docker.sh` creates the user — `install.sh` doesn't move or
-  chown the checkout, so it needs to already be somewhere `deploy` can
-  read `docker-compose.yml` from before `trade-signals.service` will
-  start cleanly.)
+- This repo checked out somewhere `root` can read — how doesn't matter
+  (`git clone`, hand-copied files, whatever): `install.sh` copies
+  `docker-compose.yml` and `grafana/` out of the checkout into
+  `DEPLOY_DIR` (`/opt/trade-signals` by default) itself, so the checkout
+  location isn't load-bearing after `install.sh` runs. See "Deploy
+  directory and `.env`" below.
 - SSH access via the keypair from `infra/terraform` (`admin_cidr`).
 - `DATA_VOLUME_ID` — the `aws_ebs_volume.data` ID, required with no
   default. Get it with:
@@ -72,15 +68,47 @@ variable isn't set.)
 4. `03-docker-user-chain.sh` — installs a default-deny rule in the
    `DOCKER-USER` iptables chain (everything except 80/443/established),
    reinstalled on every boot via a systemd unit.
-5. Renders `trade-signals.service` (substituting the checkout path and
-   deploy user) into `/etc/systemd/system/trade-signals.service`, then
+5. Copies `docker-compose.yml` and `grafana/` from the checkout into
+   `DEPLOY_DIR` (`/opt/trade-signals` by default), owned by `DEPLOY_USER`,
+   and creates `$MOUNT_POINT/timescale` (the bind-mount source for
+   TimescaleDB's data directory), also owned by `DEPLOY_USER`. See
+   "Deploy directory and `.env`" below.
+6. Renders `trade-signals.service` (substituting `DEPLOY_DIR` and
+   `DEPLOY_USER`) into `/etc/systemd/system/trade-signals.service`, then
    `daemon-reload` + `enable` (not `start` — starting is left to the
    operator or `tests/test_provision.sh`).
 
 Each numbered script can also be run standalone (`sudo provision/01-docker.sh`,
 etc.) — `install.sh` is a thin, ordered wrapper, not the only entry point.
 Rerunning `install.sh` in full is safe: every step checks current state
-before acting.
+before acting, including step 5 — `grafana/` is removed and recopied
+fresh from the checkout each run (it's config, not data, so there's
+nothing to lose), and `docker-compose.yml` is simply overwritten.
+
+## Deploy directory and `.env`
+
+`DEPLOY_DIR` (`/opt/trade-signals` by default, override by exporting
+`DEPLOY_DIR` before `install.sh`) is where `trade-signals.service`
+actually runs `docker compose` from — not the git checkout. `install.sh`
+populates it with `docker-compose.yml` and `grafana/`, but deliberately
+**never** touches `.env`: it's gitignored, holds real secrets
+(`POSTGRES_PASSWORD`, optionally `GRAFANA_PASSWORD`), and has to be
+placed there by the operator directly, e.g.:
+
+```sh
+sudo tee /opt/trade-signals/.env >/dev/null <<'EOF'
+POSTGRES_PASSWORD=<real password>
+GRAFANA_PASSWORD=<real password>
+EOF
+sudo chown deploy:deploy /opt/trade-signals/.env
+sudo chmod 600 /opt/trade-signals/.env
+```
+
+`docker compose` reads `.env` automatically from its working directory —
+no separate flag or step needed once it's in place. Without it,
+`POSTGRES_PASSWORD` is unset and TimescaleDB refuses to initialize.
+Do this before `systemctl start trade-signals` (or `tests/test_provision.sh`,
+which starts the unit as part of `test_systemd_unit_enabled_and_starts_clean`).
 
 ## Two firewall layers, in series — read this before troubleshooting connectivity
 
@@ -112,15 +140,17 @@ before acting.
 
 ## Done-condition checks
 
-After `install.sh` completes:
+After `install.sh` completes (and `.env` is placed per above):
 
 ```sh
 ufw status                                       # 22/tcp ALLOW scoped to $ADMIN_CIDR, plus 80/tcp, 443/tcp
 su - deploy -c "docker compose version"          # succeeds, no sudo
 systemctl is-enabled trade-signals               # enabled
+systemctl start trade-signals && systemctl is-active trade-signals   # active
 findmnt /mnt/trade-signals-data                  # mounted
 grep /mnt/trade-signals-data /etc/fstab          # entry uses UUID=, not a device path
 iptables -L DOCKER-USER -n                       # terminal DROP past 80/443/established
+ls /opt/trade-signals                            # docker-compose.yml, grafana/, .env
 ```
 
 Run the full suite with `sudo -E tests/test_provision.sh` (`DATA_VOLUME_ID`

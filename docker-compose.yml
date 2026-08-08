@@ -1,0 +1,40 @@
+name: my-timescale-project
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:2.26.2-pg16
+    container_name: timescaledb
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: mydb
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: shipping_grafana
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-changeme_grafana}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - timescaledb
+
+volumes:
+  timescale_data:
+    driver: local
+    driver_opts:
+      type: none
+      device: /mnt/trade-signals-data/timescale
+      o: bind
+  grafana_data:
