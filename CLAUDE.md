@@ -347,3 +347,47 @@ not Alembic, per-file transactions, zero-padded lexicographic ordering).
   `DELETE` to make the table match some other belief about what "should"
   be true, or synthesizing a replacement row to paper over a gap instead
   of just recording that the gap exists.
+
+---
+
+## 10. Jobs (`orchestration/tasks.py`)
+
+Every scheduled unit of work is a plain, zero-argument, `-> int` function
+decorated `@job("name")` (`orchestration/jobs.py`) and registered in
+`orchestration/tasks.py::JOBS`, a `dict[str, Callable[[], int]]`. Business
+logic stays in `clients/`, `normalizer/`, `targets/`, `signals/`,
+`models/`, and `alerts/` — `tasks.py` holds thin wrappers only, so a
+mechanical orchestration change can't hide a behavioral regression inside
+a large diff.
+
+- **Exactly one `@job` per scheduled unit — never nested.** A multi-step
+  chain (e.g. `normalizer-nightly`'s `port_resolver → vessel_normalizer →
+  port_summary_builder → time_aligner → seasonal_adjuster →
+  feature_builder`) runs as a single decorated call; no sub-step gets its
+  own `@job`. A sub-step failure would otherwise write a `failed` row for
+  itself *and* a `failed` row for the parent — double-counting one real
+  failure in the health view — and a partial success would leave a mix of
+  `success`/`failed` rows for what the schedule only ever knew as one
+  unit, with no way to tell which outcome actually happened.
+- **Job names are stable identifiers, not Python-convention renames.**
+  The eight names (`port-call-refresh`, `bdi-daily`, `wci-weekly`,
+  `normalizer-nightly`, `targets-nightly`, `signals-nightly`,
+  `models-nightly`, `alerts-nightly`) are exactly the former Prefect
+  deployment names, hyphens and all. They are the join key across
+  CONTEXT.md's schedule table, Commit 3's cadence configuration, and the
+  Phase 11 heartbeat's per-job overdue check — renaming one to match
+  Python naming conventions orphans every one of those silently.
+- **`rows_written` means rows written to the database, never rows
+  examined or processed.** A job that parsed 50 candidates and wrote 3
+  reports 3. A processed-count that reads nonzero while nothing landed
+  downstream is this project's recurring failure theme reproduced inside
+  its own monitoring. The one documented exception:
+  `alerts/builder.py::run_all()` returns newly-inserted alerts only (not
+  rows-affected by the upsert), since edge-triggered alerts are only
+  meaningful the day they first fire — every job's docstring states in
+  one sentence what its number counts, and the convention is never mixed
+  silently between functions.
+- **`0` and `NULL` are distinguishable and both meaningful.** `0` means
+  the job ran and legitimately wrote nothing (e.g. a scraper with no new
+  data to insert). `NULL` means the job didn't report a count at all.
+  Collapsing either into the other loses a real, alertable distinction.

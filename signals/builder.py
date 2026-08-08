@@ -303,9 +303,13 @@ def build(as_of: pd.Timestamp | None = None) -> dict[str, int]:
     return summary
 
 
-def run_all() -> dict[str, int]:
-    """Entry point for the nightly Prefect flow."""
-    return build()
+def run_all() -> int:
+    """Entry point for the nightly Prefect flow. Returns the total number
+    of `signals` rows upserted across all windows (rows affected — inserts
+    and updates both count, since ON CONFLICT DO UPDATE doesn't
+    distinguish them)."""
+    summary = build()
+    return summary.get("total_rows", 0)
 
 
 if __name__ == "__main__":

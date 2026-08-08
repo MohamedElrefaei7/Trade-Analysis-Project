@@ -119,15 +119,17 @@ def _build_one(session, spec: TargetSpec) -> int:
     return len(payload)
 
 
-def run_all() -> dict:
-    """Compute every TargetSpec. Returns {target_name: rows_written}."""
+def run_all() -> int:
+    """Compute every TargetSpec. Returns the total number of `targets`
+    rows upserted across all specs (rows affected — inserts and updates
+    both count, since ON CONFLICT DO UPDATE doesn't distinguish them)."""
     summary: dict[str, int] = {}
     with Session() as session:
         for spec in SPECS:
             summary[spec.name] = _build_one(session, spec)
     total = sum(summary.values())
     logger.info("targets: run_all complete — %d rows total", total)
-    return summary
+    return total
 
 
 if __name__ == "__main__":

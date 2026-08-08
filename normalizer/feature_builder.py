@@ -219,11 +219,13 @@ def build() -> int:
     return n
 
 
-def run_all() -> dict:
+def run_all() -> int:
     """
     Full Step 7 pipeline: resolve port names, smooth AIS into port calls,
     roll port calls up into the daily port summary, then assemble the
-    features table. This is what the nightly scheduler calls.
+    features table. This is what the nightly scheduler calls. Returns the
+    number of `features` rows upserted by the final build() step — the one
+    number that summarizes whether the whole chain produced anything.
     """
     logger.info("normalizer: starting nightly run")
     resolver_stats = port_resolver.run()
@@ -237,4 +239,4 @@ def run_all() -> dict:
         "features_upserted": n,
     }
     logger.info("normalizer: done — %s", summary)
-    return summary
+    return n

@@ -498,6 +498,20 @@ def _fetch_wci_posts(latest_ts: datetime | None, max_pages: int = 5) -> list[dic
     return out
 
 
+class WCIParseFailure(RuntimeError):
+    """
+    Raised when HSN returned WCI commentary posts but none of them yielded
+    a single parseable rate. Deliberately distinct from "zero new posts":
+    zero posts is the world having no news (a legitimate, expected 0);
+    zero parsed rates from N>0 posts means _extract_wci_values's regexes
+    stopped matching HSN's current format — a code defect, not a data
+    gap, and one the freshness-based Health tab can't see (a post exists,
+    so nothing looks stale, right up until every WCI series is frozen).
+    Letting this propagate is what turns it into a `failed` job_runs row
+    instead of a silent `success, rows_written=0`.
+    """
+
+
 def wci_scraper() -> int:
     """
     Scrape Drewry World Container Index spot rates from Hellenic Shipping News.
@@ -522,7 +536,9 @@ def wci_scraper() -> int:
     that week — Drewry doesn't always quote every route. The composite has
     the highest yield (~95% of posts).
 
-    Returns the total number of rows inserted across all series.
+    Returns the total number of rows inserted across all series. Raises
+    WCIParseFailure — never returns 0 — if posts were found but none of
+    them parsed to any lane; see that class's docstring for why.
     """
     with Session() as session:
         latest = latest_ts(session, "economic_benchmarks", "series_id", "WCI:COMPOSITE")
@@ -555,8 +571,11 @@ def wci_scraper() -> int:
         logger.info("WCI: %s — %d/6 lanes", p["ts"].date(), len(extracted))
 
     if not rows:
-        logger.warning("WCI: %d posts found but no parseable rates", len(posts))
-        return 0
+        raise WCIParseFailure(
+            f"WCI: {len(posts)} post(s) fetched but 0 parseable rates across "
+            f"all of them — HSN's commentary format likely changed; see "
+            f"_extract_wci_values / _WCI_COMPOSITE_PATTERNS / _WCI_LANE_PATTERNS"
+        )
 
     with Session() as session:
         inserted = _insert_bench_rows(session, rows)

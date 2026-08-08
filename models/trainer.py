@@ -320,14 +320,17 @@ def _build_one(spec: ModelSpec, features_z: pd.DataFrame) -> int:
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
-def run_all() -> dict[str, int]:
-    """Train every spec. Returns {target_name: rows_written}."""
+def run_all() -> int:
+    """Train every spec. Returns the total number of `predictions` rows
+    written across all specs (rows affected — OOS and live rows both
+    count, since ON CONFLICT DO UPDATE doesn't distinguish inserts from
+    updates)."""
     with Session() as session:
         features_z = _load_features_z(session)
 
     if features_z.empty:
         logger.warning("models: features_z is empty — nothing to do")
-        return {}
+        return 0
 
     summary: dict[str, int] = {}
     for spec in SPECS:
@@ -336,8 +339,7 @@ def run_all() -> dict[str, int]:
     total = sum(summary.values())
     logger.info("models: run_all complete — %d predictions across %d targets",
                 total, len(SPECS))
-    summary["total_rows"] = total
-    return summary
+    return total
 
 
 if __name__ == "__main__":

@@ -437,9 +437,15 @@ def _is_new(row: dict, asof: date) -> bool:
     return bool(r and r.age_sec is not None and r.age_sec < 60)
 
 
-def run_all() -> dict[str, int]:
-    """Entry point for the nightly Prefect flow."""
-    return build()
+def run_all() -> int:
+    """Entry point for the nightly Prefect flow. Returns the number of NEW
+    alerts inserted this run — not the number of candidates examined and
+    not the number of existing rows re-affirmed via the upsert's UPDATE
+    path. Edge-triggered alerts are only meaningful the day they first
+    fire, so "rows written" here means newly_inserted specifically, unlike
+    every other job's rows-affected convention."""
+    summary = build()
+    return summary.get("newly_inserted", 0)
 
 
 if __name__ == "__main__":
