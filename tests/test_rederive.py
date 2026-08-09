@@ -92,15 +92,10 @@ def scratch_db(monkeypatch):
             )
             """
         )
-    setup_conn.close()
-
-    # 0003 needs `vessels` to exist first (its FK) — the real migration
-    # is applied here exactly as it would be against the real database.
-    run_migrations(scratch_url, migrations_dir=REAL_MIGRATIONS_DIR)
-
-    setup_conn = psycopg2.connect(scratch_url)
-    setup_conn.autocommit = True
-    with setup_conn.cursor() as cur:
+        # migrations/0004_positions_vessel_ts_index.sql indexes
+        # positions(vessel_id, ts) — it needs to exist before
+        # run_migrations() below reaches that file, same reason 0003
+        # needs `vessels` to exist first (its FK).
         cur.execute(
             """
             CREATE TABLE positions (
@@ -115,6 +110,13 @@ def scratch_db(monkeypatch):
             )
             """
         )
+    setup_conn.close()
+
+    run_migrations(scratch_url, migrations_dir=REAL_MIGRATIONS_DIR)
+
+    setup_conn = psycopg2.connect(scratch_url)
+    setup_conn.autocommit = True
+    with setup_conn.cursor() as cur:
         cur.execute(
             """
             CREATE TABLE port_calls (

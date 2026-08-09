@@ -38,6 +38,40 @@ touches files one through four's already-committed state.
 
 Rerunning once everything is applied is a no-op.
 
+## Migrations that can't run inside a transaction
+
+Some statements — `CREATE INDEX CONCURRENTLY` is the one that comes up —
+refuse to run inside a transaction block at all, which the normal
+per-file-transaction path above can't accommodate no matter how the file
+is written. A migration whose **first line** is exactly
+
+```sql
+-- migrate:no-transaction
+```
+
+runs with autocommit on instead — no surrounding transaction (see
+`orchestration/migrate.py::_apply_migration_no_transaction`). Two
+consequences worth knowing before reaching for this:
+
+- **The file must contain exactly one statement** after the marker line.
+  PostgreSQL's simple query protocol implicitly wraps a multi-statement
+  string in its own transaction regardless of the connection's autocommit
+  setting, which would silently reintroduce the transaction block this
+  marker exists to avoid.
+- **The all-or-nothing guarantee is gone for that file.** A
+  `CREATE INDEX CONCURRENTLY` that fails partway can leave an `INVALID`
+  index object behind under the index's name, and a later
+  `IF NOT EXISTS` rerun will skip right past it instead of repairing it —
+  the name already exists, even though the index itself is unusable.
+  Check `pg_index.indisvalid` and `DROP INDEX` before retrying a marked
+  migration that failed once. See `0004_positions_vessel_ts_index.sql`
+  for a worked example, including this exact recovery note inline.
+
+Reach for a plain `CREATE INDEX` (inside the normal transaction path,
+no marker) whenever the table is small enough that the brief lock is a
+non-issue — this marker is for tables where `CONCURRENTLY`'s
+no-blocking-writes property actually matters, not a default.
+
 ## An applied migration is never edited
 
 `schema_migrations` records a sha256 checksum of each applied file

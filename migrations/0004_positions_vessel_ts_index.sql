@@ -1,0 +1,37 @@
+-- migrate:no-transaction
+-- idx_positions_vessel_ts_asc: an ascending (vessel_id, ts) index on
+-- positions, alongside the existing idx_positions_vessel_ts (vessel_id,
+-- ts DESC) from schema.sql.
+--
+-- Motivation: normalizer/rederive.py's per-chunk positions query is
+-- `ORDER BY vessel_id, ts` (ascending, matching the chronological order
+-- its per-vessel state-carry logic needs). The existing DESC index can't
+-- serve that order, so PostgreSQL falls back to a disk-spilling sort on
+-- every chunk — confirmed live on 2026-08-09 against the real server:
+-- pg_stat_activity showed the same server-side cursor still on chunk 1
+-- (2.9M rows, the smallest real week) after 66 minutes, with ~48% iowait
+-- and near-zero CPU the whole time. See CONTEXT.md's dated entry for the
+-- full diagnosis.
+--
+-- CREATE INDEX CONCURRENTLY, not a plain CREATE INDEX: positions is a
+-- 9.3GB, 38.5M-row hypertable, and a plain CREATE INDEX takes a
+-- SHARE lock that blocks writes to it for the build's duration — running
+-- that against a table the live worker/ais containers actively write to
+-- is not an acceptable trade for an index that only unblocks an offline
+-- analysis script. CONCURRENTLY refuses to run inside a transaction
+-- block at all, which is why this file carries the
+-- migrate:no-transaction marker (orchestration/migrate.py) instead of
+-- running under the runner's normal per-file transaction.
+--
+-- Known sharp edge, inherent to CONCURRENTLY, not something this
+-- migration or the runner can paper over: if a concurrent build fails
+-- partway, it can leave an INVALID index object behind under this same
+-- name, and a later IF NOT EXISTS rerun will skip right past it instead
+-- of repairing it. If this migration is ever re-applied after a failure,
+-- check first:
+--   SELECT indisvalid FROM pg_index
+--    WHERE indexrelid = 'idx_positions_vessel_ts_asc'::regclass;
+-- and DROP INDEX idx_positions_vessel_ts_asc if it's false, before
+-- rerunning.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_positions_vessel_ts_asc
+  ON positions (vessel_id, ts);

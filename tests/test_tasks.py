@@ -65,14 +65,17 @@ def scratch_db(monkeypatch):
     parts = urlsplit(admin_url)
     scratch_url = urlunsplit(parts._replace(path=f"/{db_name}"))
 
-    # migrations/0003_port_calls_derived.sql FKs to vessels(vessel_id) —
-    # not created by any migration (it's part of schema.sql), so a
-    # minimal stand-in is required before run_migrations() gets there.
+    # migrations/0003_port_calls_derived.sql FKs to vessels(vessel_id), and
+    # migrations/0004_positions_vessel_ts_index.sql indexes positions —
+    # neither table is created by any migration (they're part of
+    # schema.sql), so minimal stand-ins are required before
+    # run_migrations() gets there.
     setup_conn = psycopg2.connect(scratch_url)
     setup_conn.autocommit = True
     with setup_conn.cursor() as cur:
         cur.execute('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"')
         cur.execute("CREATE TABLE vessels (vessel_id UUID PRIMARY KEY DEFAULT uuid_generate_v4())")
+        cur.execute("CREATE TABLE positions (vessel_id UUID, ts TIMESTAMPTZ)")
     setup_conn.close()
 
     run_migrations(scratch_url, migrations_dir=REAL_MIGRATIONS_DIR)
