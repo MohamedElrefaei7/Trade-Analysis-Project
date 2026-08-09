@@ -73,6 +73,18 @@ variable isn't set.)
    and creates `$MOUNT_POINT/timescale` (the bind-mount source for
    TimescaleDB's data directory), also owned by `DEPLOY_USER`. See
    "Deploy directory and `.env`" below.
+
+   **As of Phase 3 Commit 5, this step does not yet copy what
+   `worker`/`ais` need to build.** Those two services build from the
+   repo's `Dockerfile`, which needs the full application source
+   (`requirements.txt`, `clients/`, `orchestration/`, `worker/`, `ais/`,
+   etc.) as its build context — `install.sh` only stages
+   `docker-compose.yml` and `grafana/`. Until that gap is closed (a later
+   provisioning commit), get a full checkout onto the server yourself
+   before `docker compose build` — `git clone`/`git pull` at `DEPLOY_DIR`,
+   or `rsync`, either is fine, same as any other checkout-location
+   flexibility this script already tolerates. See "Building and starting
+   the application services" below.
 6. Renders `trade-signals.service` (substituting `DEPLOY_DIR` and
    `DEPLOY_USER`) into `/etc/systemd/system/trade-signals.service`, then
    `daemon-reload` + `enable` (not `start` — starting is left to the
@@ -92,23 +104,74 @@ nothing to lose), and `docker-compose.yml` is simply overwritten.
 actually runs `docker compose` from — not the git checkout. `install.sh`
 populates it with `docker-compose.yml` and `grafana/`, but deliberately
 **never** touches `.env`: it's gitignored, holds real secrets
-(`POSTGRES_PASSWORD`, optionally `GRAFANA_PASSWORD`), and has to be
-placed there by the operator directly, e.g.:
+(`POSTGRES_PASSWORD`, optionally `GRAFANA_PASSWORD`, and — as of Phase 3
+Commit 5 — `AISSTREAM_API_KEY`), and has to be placed there by the
+operator directly, e.g.:
 
 ```sh
 sudo tee /opt/trade-signals/.env >/dev/null <<'EOF'
 POSTGRES_PASSWORD=<real password>
 GRAFANA_PASSWORD=<real password>
+AISSTREAM_API_KEY=<real key>
 EOF
 sudo chown deploy:deploy /opt/trade-signals/.env
 sudo chmod 600 /opt/trade-signals/.env
 ```
 
 `docker compose` reads `.env` automatically from its working directory —
-no separate flag or step needed once it's in place. Without it,
-`POSTGRES_PASSWORD` is unset and TimescaleDB refuses to initialize.
-Do this before `systemctl start trade-signals` (or `tests/test_provision.sh`,
-which starts the unit as part of `test_systemd_unit_enabled_and_starts_clean`).
+no separate flag or step needed once it's in place. Without
+`POSTGRES_PASSWORD`, TimescaleDB refuses to initialize; without
+`AISSTREAM_API_KEY`, the `ais` service fails to start — deliberately, see
+below, a silently keyless AIS daemon is worse than one that refuses to
+run. Do this before `systemctl start trade-signals` (or
+`tests/test_provision.sh`, which starts the unit as part of
+`test_systemd_unit_enabled_and_starts_clean`).
+
+## Building and starting the application services
+
+`docker-compose.yml` defines four services: `timescaledb`, `grafana`
+(unchanged since Provision 4), and — as of Phase 3 Commit 5 — `worker`
+(the APScheduler process, CLAUDE.md § 11) and `ais` (the AIS WebSocket
+daemon, CLAUDE.md § 12), both built from the repo's `Dockerfile` and both
+running under `restart: unless-stopped`. From `DEPLOY_DIR`, with a full
+checkout in place (see the note on step 5 above) and `.env` populated as
+above:
+
+```sh
+cd /opt/trade-signals
+sudo -u deploy docker compose build
+```
+
+**Then apply any pending schema migrations — before, and separately
+from, `docker compose up -d`:**
+
+```sh
+sudo -u deploy docker compose run --rm worker python -m orchestration.migrate
+```
+
+This is a deliberate, explicit operator step, not something either
+service's container command does on startup. A migration is an act
+against a database holding irreplaceable AIS history — coupling it to
+container start means a restart loop becomes a migration-attempt loop.
+`docker compose run --rm worker ...` reuses the `worker` service's image
+and environment (so it gets `DATABASE_URL` for free) without leaving a
+long-running container behind. See `migrations/README.md` for what the
+runner itself guarantees (checksummed, never-edit-after-apply,
+`schema.sql` refused outright).
+
+Only then:
+
+```sh
+sudo -u deploy docker compose up -d
+sudo -u deploy docker ps
+```
+
+`depends_on` in `docker-compose.yml` only waits for the `timescaledb`
+*container* to start, not for Postgres to actually accept connections —
+so on a cold boot, `worker` and `ais` will likely fail their first
+connection attempt and get restarted by Docker. That's the supervision
+model working as designed, not a fault to chase; both should settle into
+a stable `Up` state within a few restarts. See CLAUDE.md § Deployment.
 
 ## Two firewall layers, in series — read this before troubleshooting connectivity
 
@@ -181,6 +244,8 @@ by this commit.
 
 ## Out of scope here
 
-`docker-compose.yml`'s real service definitions, the APScheduler worker,
-AIS ingestion, S3 backups, Caddy/TLS. The `04-` numbering is left open for
-those. See CLAUDE.md's `§ Up Next` / `CONTEXT.md`.
+Having `install.sh` itself stage a full application checkout (so
+`docker compose build` needs nothing beyond what step 5 already copies),
+S3 backups, Caddy/TLS, and healthcheck-gated `depends_on` ordering for
+`worker`/`ais` against `timescaledb`. The `04-` numbering is left open for
+these. See CLAUDE.md's `§ Deployment` and `§ Up Next` / `CONTEXT.md`.

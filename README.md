@@ -28,7 +28,7 @@ A maritime data pipeline that ingests real-time vessel positions and shipping in
 ## Stack
 
 - **Database** — PostgreSQL 16 + TimescaleDB (hypertables for positions, port calls, benchmarks)
-- **Orchestration** — Prefect 3.x (8 scheduled flows + AIS daemon thread)
+- **Orchestration** — APScheduler (`worker/main.py`, 8 scheduled jobs) + a standalone AIS daemon (`ais/main.py`)
 - **ML** — scikit-learn `ElasticNetCV` with walk-forward time-series cross-validation
 - **Statistics** — Pearson/Spearman correlations, Granger causality (statsmodels)
 - **Dashboard** — Streamlit + Plotly
@@ -70,7 +70,6 @@ Required variables:
 ```env
 DATABASE_URL=postgresql://admin:password@localhost:5432/mydb
 AISSTREAM_API_KEY=...
-PREFECT_API_URL=http://127.0.0.1:4200/api
 
 # Optional
 SLACK_WEBHOOK_URL=...
@@ -83,24 +82,28 @@ GRAFANA_PASSWORD=changeme_grafana
 docker-compose up -d
 ```
 
-### 4. Apply the schema
+### 4. Restore from a dump
+
+`schema.sql` is a historical artifact and is never re-applied against a
+populated database — see `CLAUDE.md` § Hard invariants. A fresh database
+is provisioned by restoring the latest verified dump:
 
 ```bash
-psql $DATABASE_URL -f schema.sql
+pg_restore -d $DATABASE_URL /path/to/latest.dump
 ```
 
-### 5. Start Prefect server (terminal 1)
-
-```bash
-prefect server start
-# UI available at http://127.0.0.1:4200
-```
-
-### 6. Start the pipeline (terminal 2)
+### 5. Start the AIS daemon (terminal 1)
 
 ```bash
 source venv/bin/activate
-python scheduler.py
+python -m ais.main
+```
+
+### 6. Start the scheduled-job worker (terminal 2)
+
+```bash
+source venv/bin/activate
+python -m worker.main
 ```
 
 ### 7. Start the dashboard (terminal 3)
@@ -117,8 +120,8 @@ streamlit run dashboard/streamlit_app.py
 
 | Flow | When | Description |
 |---|---|---|
-| AIS stream | Continuous | Real-time vessel position + port call detection |
-| `port-call-refresh` | Every 2 hours | AIS thread health check; stale call audit |
+| AIS daemon (`ais/main.py`) | Continuous, standalone process | Real-time vessel position + port call detection |
+| `port-call-refresh` | Every 2 hours | Stale open-call audit |
 | `bdi-daily` | 18:30 UTC | Baltic Dry Index close |
 | `wci-weekly` | Fridays 09:00 UTC | Drewry WCI spot rates |
 | `normalizer-nightly` | 23:30 UTC | Feature table build (deseasonalize, z-score) |
@@ -144,13 +147,20 @@ Five tabs, in priority order:
 ## Project Architecture
 
 ```
-├── scheduler.py          # Prefect orchestrator + AIS daemon
-├── schema.sql            # Full database schema
+├── schema.sql            # Full database schema (historical artifact, never re-applied)
 ├── requirements.txt
+│
+├── ais/main.py           # Standalone AIS daemon entrypoint — connection lifecycle only
+│
+├── worker/               # APScheduler process running the eight scheduled jobs
+│   ├── main.py
+│   └── cadences.py
+│
+├── orchestration/        # migrate.py (numbered-SQL runner), jobs.py (@job decorator), tasks.py (JOBS registry)
 │
 ├── clients/              # Data ingest
 │   ├── base.py           # Shared DB session, retry decorator
-│   ├── aisstream.py      # AIS WebSocket → positions + port_calls
+│   ├── aisstream.py      # AIS WebSocket message handling → positions + port_calls
 │   ├── scraper.py        # BDI, WCI scrapers
 │   └── geo.py            # Haversine distance + port lookup
 │

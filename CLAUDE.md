@@ -143,7 +143,7 @@ gets parsed as part of the token. Every cast on a *bound parameter* in this
 codebase goes through `CAST(:x AS sometype)` (see `clients/aisstream.py`,
 `clients/scraper.py`). Plain `expression::type` on a
 column or function result (not a bind param) is fine and already used in a
-few places (`normalizer/port_summary_builder.py`, `scheduler.py`) —
+few places (`normalizer/port_summary_builder.py`) —
 the rule is specifically about parameters, not all casts.
 Someone will "tidy" a `CAST(:p AS type)` back into `:p::type`; it will parse
 fine in the editor and break at runtime, not at import time.
@@ -200,7 +200,6 @@ cap across detectors without per-type priority rules.
 |---|---|
 | `DATABASE_URL` | SQLAlchemy connection string for the TimescaleDB instance |
 | `AISSTREAM_API_KEY` | AISStream WebSocket API key |
-| `PREFECT_API_URL` | URL of a running `prefect server start` instance — `scheduler.py` fails fast if this is unset or unreachable |
 | `GRAFANA_PASSWORD` | Grafana admin password (Docker Compose) |
 | `SLACK_WEBHOOK_URL` | Optional — enables the alerter's Slack digest post |
 | `LOG_LEVEL` | Python `logging` level for the shared `"maritime"` logger (default `INFO`) |
@@ -220,23 +219,6 @@ objects fails loudly with "already exists" errors partway through the script
 half-applied. More importantly: this database holds live-streamed AIS
 history that cannot be re-collected, so there is no acceptable reason to
 re-apply this file against a database that already has data in it.
-
-### Exactly one `scheduler.py` process at a time
-
-Running two instances causes both to re-register Prefect deployments on
-startup, which can reset scheduled trigger times. Daily flows self-heal
-within 24h (they just re-trigger on their next scheduled time); `wci-weekly`
-— the only non-daily flow left — does not: a reset trigger time can mean it
-silently never fires again until someone notices.
-
-### Prefect server must be running before `scheduler.py` starts
-
-`scheduler.py`'s `_require_prefect_api()` checks that `PREFECT_API_URL` is
-set and reachable (`GET {url}/health`) before doing anything else, and
-raises `SystemExit` if not. Without this check, Prefect's `serve()` would
-silently spawn an ephemeral in-process server on a random port — the
-scheduler would appear to start fine, but every flow run would be detached
-from persistent history and vanish on restart.
 
 ---
 
@@ -467,3 +449,98 @@ isn't flagged overdue.
   scheduler blocks — a job with no cadence would otherwise simply never
   run, and a cadence naming no job would crash hours later at fire time,
   in a log nobody's watching.
+
+---
+
+## 12. AIS daemon (`ais/main.py`, `clients/aisstream.py`)
+
+The AIS ingest daemon splits across two files, each owning exactly one
+concern: `clients/aisstream.py` owns subscription construction, message
+parsing, the `_vessel_state` cache, and the `vessels`/`positions`/
+`port_calls` writes; `ais/main.py` owns the connection lifecycle —
+connect, hand messages to the client, decide whether a dropped
+connection is routine or fatal, and respond to signals. Run standalone
+with `python -m ais.main`.
+
+As contract:
+
+- **Transient WebSocket disconnects are handled in-process**, with
+  capped exponential backoff (`ais/main.py::run_forever()` — starts near
+  5s, caps near 60s). This is what stops a routine network blip from
+  recycling the whole container.
+- **Sustained failure escalates — it is never absorbed.** Past
+  `MAX_CONSECUTIVE_FAILURES` (10) consecutive failed connection
+  attempts, the process raises `ConnectionFailureLimitExceeded` and
+  exits non-zero, handing recovery to Docker's `restart: unless-stopped`
+  policy. A successful connection, however brief, resets the failure
+  count to zero. The process never decides on its own that persistent
+  failure is survivable — a daemon that swallows every exception and
+  retries forever looks, to Docker, like a healthy running process while
+  ingesting nothing, and nothing downstream would ever know.
+- **Unknown prior vessel state at cold start records no transition.**
+  `_vessel_state` is in-memory and empty on every restart;
+  `clients/aisstream.py::_update_port_call()` treats "no cached prior
+  nav_status" as exactly that — not as "underway" — and just records the
+  observed state instead of writing a spurious arrival for every vessel
+  already sitting in port. `normalizer/vessel_normalizer.py`'s nightly
+  48-hour lookback over `positions` is the recovery path for whatever
+  this misses; the guard is only safe because that recovery exists.
+- **Exit codes are deliberate, not incidental.** `SIGTERM` (Docker's stop
+  signal, sent before `SIGKILL`) triggers a clean shutdown — close the
+  socket, let any open session unwind — and exits `0`, so
+  `docker compose down` never reads as a crash in the logs. Hitting the
+  failure ceiling exits non-zero, so it does.
+- **This daemon writes nothing to `job_runs`.** It's a continuous
+  process, not a scheduled unit that returns (see § 10's `@job`
+  contract) — a process reporting its own liveness is the same pattern
+  that let Prefect flows record "Completed" through a dead stack. AIS
+  liveness must be observed from outside, by something that checks
+  whether `positions.ts` is actually still advancing, not by asking the
+  daemon whether it feels fine.
+
+---
+
+## 13. Deployment (`Dockerfile`, `docker-compose.yml`)
+
+`worker` and `ais` run as containers, both built from the same root
+`Dockerfile` and both under `restart: unless-stopped`, alongside
+`timescaledb` and `grafana`. As contract:
+
+- **One image serves both `worker` and `ais`, differentiated only by
+  `command:`.** They import the same `clients/`/`orchestration/` tree and
+  the same `requirements.txt`; two Dockerfiles would mean two dependency
+  installs free to drift apart, surfacing as one service having a library
+  version the other doesn't, in production, months later.
+- **The deployed Python runtime is pinned at 3.12 (`python:3.12-slim`),
+  while local development runs 3.14.** This divergence is deliberate, not
+  an oversight — the server's system Python and the venv the live
+  verifications actually ran under are both 3.12. Base images are always
+  pinned to a specific minor version, never `latest` or a bare major tag
+  — `timescale/timescaledb:latest-pg16` resolving to two different
+  TimescaleDB versions three months apart already cost a debugging
+  session over exactly this.
+- **All image tags are pinned, never `latest`.** Applies to every service
+  in `docker-compose.yml`, not just the application image.
+- **Migrations are an explicit operator step, never run on container
+  start.** `docker compose run --rm worker python -m orchestration.migrate`,
+  by hand, before `docker compose up -d` — see `provision/README.md`. A
+  migration is a deliberate act against a database holding irreplaceable
+  data; coupling it to container restart turns a restart loop into a
+  migration loop.
+- **No service publishes a port except `caddy`, in a later phase.**
+  Nothing outside the Compose network talks to `worker` or `ais`
+  directly, and `timescaledb`/`grafana` stay bound to `127.0.0.1`. The
+  `DOCKER-USER` iptables chain (§ 8) is the backstop, not the primary
+  defense — not publishing the port is.
+- **`worker` and `ais` run as a non-root user inside the container.** Root
+  inside a container isn't root on the host, but it's one
+  container-escape away from it, and neither process needs it.
+- **`depends_on: timescaledb` only waits for the container to start, not
+  for Postgres to accept connections.** A cold boot's first connection
+  attempt from `worker`/`ais` can fail and get restarted by Docker — that
+  is the supervision model working, not a fault. A
+  healthcheck-gated `depends_on: condition: service_healthy` is a
+  reasonable later refinement, deliberately not done yet — it adds a
+  failure mode (a healthcheck that never passes blocks startup silently)
+  that should not be introduced before the plain retry path has been
+  exercised for real.

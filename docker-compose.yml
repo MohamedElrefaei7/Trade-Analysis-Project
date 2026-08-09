@@ -1,5 +1,11 @@
 name: my-timescale-project
 
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   timescaledb:
     image: timescale/timescaledb:2.26.2-pg16
@@ -13,9 +19,10 @@ services:
       - "127.0.0.1:5432:5432"
     volumes:
       - timescale_data:/var/lib/postgresql/data
+    logging: *default-logging
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:13.0.1
     container_name: shipping_grafana
     restart: unless-stopped
     ports:
@@ -29,6 +36,44 @@ services:
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - timescaledb
+    logging: *default-logging
+
+  # APScheduler process running the eight orchestration/tasks.py jobs on
+  # worker/cadences.py's schedule (CLAUDE.md § 11). Same image as `ais`,
+  # differentiated only by command — see Dockerfile and CLAUDE.md §
+  # Deployment. depends_on only waits for the timescaledb *container* to
+  # start, not for Postgres to accept connections, so a cold boot's first
+  # connection attempt here can legitimately fail — that failure and the
+  # resulting restart is the supervision model working, not a bug (see
+  # decision 7 in the Commit 5 spec / CONTEXT.md).
+  worker:
+    build: .
+    container_name: worker
+    command: python -m worker.main
+    restart: unless-stopped
+    depends_on:
+      - timescaledb
+    environment:
+      DATABASE_URL: postgresql://admin:${POSTGRES_PASSWORD}@timescaledb:5432/mydb
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    logging: *default-logging
+
+  # Standalone AIS WebSocket daemon (CLAUDE.md § 12). Same image as
+  # `worker`. Requires AISSTREAM_API_KEY with no default — deliberately:
+  # a silently keyless AIS daemon is worse than one that refuses to
+  # start, so this is not given a fallback value.
+  ais:
+    build: .
+    container_name: ais
+    command: python -m ais.main
+    restart: unless-stopped
+    depends_on:
+      - timescaledb
+    environment:
+      DATABASE_URL: postgresql://admin:${POSTGRES_PASSWORD}@timescaledb:5432/mydb
+      AISSTREAM_API_KEY: ${AISSTREAM_API_KEY}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    logging: *default-logging
 
 volumes:
   timescale_data:

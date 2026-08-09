@@ -119,32 +119,11 @@ def test_features_written_with_lag_adjusted_false():
 
 # ---------------------------------------------------------------------------
 # Part 3 — scheduler deployments
-# ---------------------------------------------------------------------------
-
-_EXPECTED_DEPLOYMENTS = {
-    "port-call-refresh",
-    "bdi-daily",
-    "wci-weekly",
-    "normalizer-nightly",
-    "targets-nightly",
-    "signals-nightly",
-    "models-nightly",
-    "alerts-nightly",
-}
-
-
-def test_deployment_names_exact():
-    """The set of deployment names scheduler._build_deployments() returns
-    must equal exactly the 8 surviving flows — not just the same count,
-    so swapping one flow for another is also caught."""
-    import scheduler
-
-    names = {d.name for d in scheduler._build_deployments()}
-    assert names == _EXPECTED_DEPLOYMENTS, (
-        f"deployment set drifted — got {names!r}, expected {_EXPECTED_DEPLOYMENTS!r}"
-    )
-
-
+#
+# scheduler.py and its Prefect deployments were retired in Phase 3 Commit 4
+# (superseded by orchestration/tasks.py::JOBS, Commit 2 — see
+# tests/test_tasks.py::test_jobs_registry_contains_exactly_the_eight_expected_names
+# for the equivalent invariant against the surviving registry).
 # ---------------------------------------------------------------------------
 # Part 4 — dependencies
 # ---------------------------------------------------------------------------

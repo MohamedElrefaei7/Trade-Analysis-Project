@@ -7,8 +7,14 @@ Connects to the AISStream real-time AIS feed and writes:
   - port_calls     : arrival when a vessel moors/anchors near a known port;
                      departure when it gets underway again
 
-AISStream uses a persistent WebSocket, not REST polling. This module runs as
-a long-lived async process. On disconnect it reconnects automatically.
+AISStream uses a persistent WebSocket, not REST polling. Message parsing,
+the vessel/position/port-call writes, and arrival/departure detection
+all live here and are stable, tested code. The connection lifecycle —
+how many times to retry a dropped connection, how long to wait between
+attempts, and when to give up entirely — is a supervision concern that
+belongs to the process running this module, not to this module itself;
+see ais/main.py, which owns that policy and calls connect_once() below
+in a loop.
 
 WebSocket URL:  wss://stream.aisstream.io/v0/stream
 Subscribe msg format:
@@ -20,11 +26,11 @@ Subscribe msg format:
 
 Usage:
     import asyncio
-    from clients.aisstream import stream
-    asyncio.run(stream())
+    from clients.aisstream import connect_once, ensure_port_cache_loaded
+    ensure_port_cache_loaded()
+    asyncio.run(connect_once())   # one connection attempt; raises on failure
 """
 
-import asyncio
 import json
 import os
 from datetime import datetime, timezone
@@ -176,9 +182,22 @@ def _update_port_call(session, mmsi: str, vessel_id: str,
 
     Arrival  : vessel enters STATIONARY state within ARRIVAL_RADIUS_KM of a port.
     Departure: vessel leaves STATIONARY state when a prior call_id is tracked.
+
+    A vessel with no cached prior nav_status — the first message seen for
+    it since this process started, routine after a daemon restart — is
+    not compared against anything: no prior state means no transition.
+    Treating an unknown prior as "underway" would register every vessel
+    already sitting in port as a fresh arrival on every restart. We just
+    record the observed state and return; normalizer/vessel_normalizer.py
+    re-derives arrivals/departures nightly from a 48h positions lookback,
+    which recovers whatever this misses.
     """
-    state = _vessel_state.get(mmsi, {})
-    prev_status = state.get("nav_status", "unknown")
+    state = _vessel_state.get(mmsi)
+    if state is None or "nav_status" not in state:
+        _vessel_state.setdefault(mmsi, {})["nav_status"] = nav_status_str
+        return
+
+    prev_status = state["nav_status"]
 
     # ── Arrival ───────────────────────────────────────────────────────────────
     if nav_status_str in _STATIONARY and prev_status not in _STATIONARY:
@@ -270,20 +289,33 @@ def _handle_message(session, msg: dict) -> None:
                       float(lat), float(lon), nav_status_str, ts)
 
 
-# ── Main async loop ───────────────────────────────────────────────────────────
+# ── Connection lifecycle ──────────────────────────────────────────────────────
 
-async def stream() -> None:
+def ensure_port_cache_loaded() -> None:
     """
-    Connect to AISStream, subscribe to all configured bounding boxes,
-    and process messages indefinitely. Reconnects automatically on disconnect.
+    Populate the module-level port cache from the ports table. Call once
+    before the first connect_once() — the cache is process-wide and
+    doesn't need reloading between reconnects.
     """
-    if not AISSTREAM_API_KEY:
-        logger.error("AISSTREAM_API_KEY not set — cannot start AIS stream")
-        return
-
-    # Load port cache once at startup
     with Session() as session:
         _load_port_cache(session)
+
+
+async def connect_once() -> None:
+    """
+    Perform exactly one AISStream connection attempt: connect, subscribe
+    to all configured bounding boxes, and process messages until the
+    connection ends. Raises on a failed connect or on any error the
+    underlying websocket surfaces; returns normally only if the remote
+    end closes the connection without error.
+
+    This makes one attempt and nothing more — how many times to retry,
+    how long to wait between attempts, and when to give up entirely is a
+    supervision policy owned by the caller (ais/main.py), not this
+    module. See that module's run_forever().
+    """
+    if not AISSTREAM_API_KEY:
+        raise RuntimeError("AISSTREAM_API_KEY not set — cannot start AIS stream")
 
     subscribe_payload = json.dumps(
         {
@@ -293,29 +325,16 @@ async def stream() -> None:
         }
     )
 
-    while True:
-        try:
-            async with websockets.connect(_WS_URL, ping_interval=30) as ws:
-                await ws.send(subscribe_payload)
-                logger.info("AISStream connected — listening for position reports")
+    async with websockets.connect(_WS_URL, ping_interval=30) as ws:
+        await ws.send(subscribe_payload)
+        logger.info("AISStream connected — listening for position reports")
 
-                with Session() as session:
-                    async for raw in ws:
-                        try:
-                            msg = json.loads(raw)
-                            if msg.get("MessageType") == "PositionReport":
-                                _handle_message(session, msg)
-                        except Exception as exc:
-                            # Don't crash the loop on a single bad message
-                            logger.warning("Message handling error: %s", exc)
-
-        except websockets.ConnectionClosed as exc:
-            logger.warning("AISStream disconnected (%s) — reconnecting in 5s", exc)
-        except Exception as exc:
-            logger.error("AISStream error: %s — reconnecting in 5s", exc)
-
-        await asyncio.sleep(5)
-
-
-if __name__ == "__main__":
-    asyncio.run(stream())
+        with Session() as session:
+            async for raw in ws:
+                try:
+                    msg = json.loads(raw)
+                    if msg.get("MessageType") == "PositionReport":
+                        _handle_message(session, msg)
+                except Exception as exc:
+                    # Don't let one bad message end the whole connection
+                    logger.warning("Message handling error: %s", exc)

@@ -1,1 +1,2 @@
 python-hcl2>=6.0
+pyyaml>=6.0
