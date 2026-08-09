@@ -22,7 +22,7 @@ services:
     logging: *default-logging
 
   grafana:
-    image: grafana/grafana:13.0.1
+    image: grafana/grafana:13.1.3
     container_name: shipping_grafana
     restart: unless-stopped
     ports:
