@@ -56,6 +56,7 @@ services:
     environment:
       DATABASE_URL: postgresql://admin:${POSTGRES_PASSWORD}@timescaledb:5432/mydb
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
     logging: *default-logging
 
   # Standalone AIS WebSocket daemon (CLAUDE.md § 12). Same image as
@@ -71,7 +72,6 @@ services:
       - timescaledb
     environment:
       DATABASE_URL: postgresql://admin:${POSTGRES_PASSWORD}@timescaledb:5432/mydb
-      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
       AISSTREAM_API_KEY: ${AISSTREAM_API_KEY}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     logging: *default-logging
