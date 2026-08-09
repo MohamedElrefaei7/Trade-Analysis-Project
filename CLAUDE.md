@@ -305,7 +305,7 @@ not Alembic, per-file transactions, zero-padded lexicographic ordering).
   database."
 - **`job_runs.status` is constrained to exactly `running` / `success` /
   `failed`** by a `CHECK` constraint (`migrations/0001_job_runs.sql`),
-  not just application-level convention. The eventual Phase 11 heartbeat
+  not just application-level convention. The `heartbeat` job (§ 13)
   queries `WHERE status = 'success'`; a typo'd status string fails at the
   database instead of silently making every job look overdue — or,
   worse, none.
@@ -329,6 +329,19 @@ not Alembic, per-file transactions, zero-padded lexicographic ordering).
   `DELETE` to make the table match some other belief about what "should"
   be true, or synthesizing a replacement row to paper over a gap instead
   of just recording that the gap exists.
+- **`port_calls` is never rewritten in bulk.** A suspected data-quality
+  problem in `port_calls` — e.g. the restart-spike phantom arrivals found
+  and measured via `port_calls_derived`/`normalizer/rederive.py` — gets
+  corrected by deriving a parallel table and comparing, never by an
+  UPDATE/DELETE against `port_calls` itself as part of the measurement.
+  `port_calls` has two legitimate writers by design (§ 2's layer
+  contract) and is the only record of arrivals whose supporting position
+  pings may predate what's still in `positions`; a bulk rewrite driven by
+  a re-derivation would destroy exactly the rows the measurement exists
+  to identify, before anyone had seen the numbers. Any decision to
+  actually alter the stored rows is a separate, human-approved step taken
+  after the numbers are in hand — not a step inside the measurement
+  itself.
 
 ---
 

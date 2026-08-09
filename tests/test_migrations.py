@@ -44,6 +44,17 @@ def scratch_db():
     parts = urlsplit(admin_url)
     scratch_url = urlunsplit(parts._replace(path=f"/{db_name}"))
 
+    # migrations/0003_port_calls_derived.sql FKs to vessels(vessel_id) —
+    # not created by any migration (it's part of schema.sql), so a
+    # minimal stand-in is required before any test's own run_migrations()
+    # call against REAL_MIGRATIONS_DIR reaches it.
+    setup_conn = psycopg2.connect(scratch_url)
+    setup_conn.autocommit = True
+    with setup_conn.cursor() as cur:
+        cur.execute('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"')
+        cur.execute("CREATE TABLE vessels (vessel_id UUID PRIMARY KEY DEFAULT uuid_generate_v4())")
+    setup_conn.close()
+
     try:
         yield scratch_url
     finally:
