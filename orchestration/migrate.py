@@ -25,6 +25,12 @@ import psycopg2
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 MIGRATION_FILENAME_RE = re.compile(r"^\d{4}_[A-Za-z0-9_]+\.sql$")
 
+# A migration whose first line is exactly this marker runs with
+# autocommit on, outside any transaction block — see
+# _apply_migration_no_transaction()'s docstring for why this exists and
+# what it gives up to get it.
+NO_TRANSACTION_MARKER = "-- migrate:no-transaction"
+
 
 class MigrationError(Exception):
     """Raised for any condition that must stop a migration run cold:
@@ -35,11 +41,16 @@ class MigrationError(Exception):
 def run_migrations(database_url: str, migrations_dir: Path | str = MIGRATIONS_DIR) -> list[str]:
     """
     Apply every pending migration in migrations_dir against database_url,
-    one file at a time, each in its own transaction. Returns the filenames
-    applied, in application order. A no-op if everything is already
-    applied. Raises MigrationError without applying anything further if
-    schema.sql is present, an already-applied file's checksum no longer
-    matches, or a migration's DDL fails.
+    one file at a time, each in its own transaction — except a file whose
+    first line is exactly NO_TRANSACTION_MARKER, which runs with
+    autocommit on instead (see _apply_migration_no_transaction() for why:
+    statements like CREATE INDEX CONCURRENTLY refuse to run inside a
+    transaction block at all, so no amount of per-file transaction
+    wrapping can support them). Returns the filenames applied, in
+    application order. A no-op if everything is already applied. Raises
+    MigrationError without applying anything further if schema.sql is
+    present, an already-applied file's checksum no longer matches, or a
+    migration's DDL fails.
     """
     migrations_dir = Path(migrations_dir)
     _refuse_schema_sql(migrations_dir)
@@ -130,9 +141,19 @@ def _verify_checksums(files: list[Path], applied: dict[int, tuple[str, str]]) ->
             )
 
 
+def _requires_no_transaction(sql_text: str) -> bool:
+    lines = sql_text.splitlines()
+    return bool(lines) and lines[0].strip() == NO_TRANSACTION_MARKER
+
+
 def _apply_migration(conn, path: Path, version: int) -> None:
     sql_text = path.read_text()
     checksum = _sha256_bytes(path.read_bytes())
+
+    if _requires_no_transaction(sql_text):
+        _apply_migration_no_transaction(conn, path, version, sql_text, checksum)
+        return
+
     try:
         with conn.cursor() as cur:
             cur.execute(sql_text)
@@ -145,6 +166,67 @@ def _apply_migration(conn, path: Path, version: int) -> None:
     except Exception as exc:
         conn.rollback()
         raise MigrationError(f"Migration {path.name} failed: {exc}") from exc
+
+
+def _apply_migration_no_transaction(conn, path: Path, version: int, sql_text: str, checksum: str) -> None:
+    """
+    Applies a `-- migrate:no-transaction`-marked migration with autocommit
+    on, so its SQL runs with no surrounding transaction block. This
+    exists for statements PostgreSQL refuses to run inside one at all —
+    CREATE INDEX CONCURRENTLY chief among them — which the ordinary path
+    (every file wrapped in one transaction, per this module's docstring)
+    cannot support no matter how the file is written.
+
+    A marked file must contain exactly one statement after the marker
+    line. The simple query protocol implicitly wraps a multi-statement
+    string in its own BEGIN/COMMIT regardless of the connection's
+    autocommit setting, which would silently reintroduce the same
+    transaction block this exists to avoid.
+
+    This trades away the ordinary path's all-or-nothing guarantee,
+    deliberately, because there's no alternative that keeps it: a
+    CONCURRENTLY build that fails partway can leave an INVALID index
+    object behind, and — a known PostgreSQL sharp edge, not a bug here —
+    a later `IF NOT EXISTS` rerun will skip right over it rather than
+    repairing it, because the name already exists even though the index
+    itself is unusable. An operator hitting that needs to check
+    `pg_index.indisvalid` and `DROP INDEX` it before retrying; this
+    runner has no way to detect or fix that for them. The
+    schema_migrations row is still only written after the DDL succeeds —
+    same contract as every other migration — it's just that "succeeds"
+    no longer means "atomically, together with that row."
+    """
+    # psycopg2 refuses to toggle autocommit while a transaction is open
+    # (e.g. left open by _get_applied_versions()'s/_verify_checksums()'s
+    # reads, or a prior ordinary migration's implicit transaction) — close
+    # it out first. Nothing here needs rolling back; those were all reads
+    # or already-committed writes.
+    conn.commit()
+    original_autocommit = conn.autocommit
+    conn.autocommit = True
+    try:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql_text)
+        except Exception as exc:
+            raise MigrationError(f"Migration {path.name} failed: {exc}") from exc
+    finally:
+        conn.autocommit = original_autocommit
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO schema_migrations (version, filename, checksum, applied_at) "
+                "VALUES (%s, %s, %s, now())",
+                (version, path.name, checksum),
+            )
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        raise MigrationError(
+            f"Migration {path.name}'s DDL succeeded but recording it in "
+            f"schema_migrations failed: {exc}"
+        ) from exc
 
 
 def _version_of(path: Path) -> int:

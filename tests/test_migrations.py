@@ -199,3 +199,62 @@ def test_migrations_apply_in_zero_padded_order(scratch_db, tmp_path):
     assert applied == ["0002_first.sql", "0010_second.sql"]
     rows = _fetch_all(scratch_db, "SELECT name FROM order_log ORDER BY id")
     assert [r[0] for r in rows] == ["0002_first.sql", "0010_second.sql"]
+
+def test_no_transaction_marker_allows_create_index_concurrently(scratch_db, tmp_path):
+    """CREATE INDEX CONCURRENTLY refuses to run inside a transaction
+    block at all — no per-file transaction wrapping can support it. A
+    migration starting with the -- migrate:no-transaction marker must run
+    with autocommit on instead, and this is a real proof, not a mock: the
+    migration actually succeeds and the index actually exists."""
+    conn = psycopg2.connect(scratch_db)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE concurrency_target (id INTEGER)")
+    conn.close()
+
+    migrations_dir = tmp_path / "migrations"
+    migrations_dir.mkdir()
+    _write_migration(
+        migrations_dir,
+        "0001_concurrent_index.sql",
+        "-- migrate:no-transaction\n"
+        "CREATE INDEX CONCURRENTLY idx_concurrency_target_id ON concurrency_target (id);\n",
+    )
+
+    applied = run_migrations(scratch_db, migrations_dir=migrations_dir)
+
+    assert applied == ["0001_concurrent_index.sql"]
+    rows = _fetch_all(
+        scratch_db,
+        "SELECT indexrelid::regclass::text, indisvalid FROM pg_index "
+        "WHERE indexrelid = 'idx_concurrency_target_id'::regclass",
+    )
+    assert rows == [("idx_concurrency_target_id", True)]
+    version_rows = _fetch_all(scratch_db, "SELECT filename FROM schema_migrations")
+    assert version_rows == [("0001_concurrent_index.sql",)]
+
+
+def test_migration_without_marker_runs_inside_transaction(scratch_db, tmp_path):
+    """The negative control for the test above: the exact same statement,
+    without the marker, must fail with Postgres's real error for running
+    CONCURRENTLY inside a transaction block — proving the marker is what
+    actually controls the transaction wrapping, not an unrelated success."""
+    conn = psycopg2.connect(scratch_db)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE concurrency_target2 (id INTEGER)")
+    conn.close()
+
+    migrations_dir = tmp_path / "migrations"
+    migrations_dir.mkdir()
+    _write_migration(
+        migrations_dir,
+        "0001_concurrent_index_unmarked.sql",
+        "CREATE INDEX CONCURRENTLY idx_concurrency_target2_id ON concurrency_target2 (id);\n",
+    )
+
+    with pytest.raises(MigrationError, match="cannot run inside a transaction block"):
+        run_migrations(scratch_db, migrations_dir=migrations_dir)
+
+    rows = _fetch_all(scratch_db, "SELECT version FROM schema_migrations")
+    assert rows == []
