@@ -13,11 +13,11 @@ failures need to be visible and rerunnable, not silent and one-shot.
 - A running instance from `infra/terraform/` (Ubuntu 24.04 arm64,
   `t4g.medium`, with `aws_ebs_volume.data` attached).
 - This repo checked out somewhere `root` can read — how doesn't matter
-  (`git clone`, hand-copied files, whatever): `install.sh` copies
-  `docker-compose.yml` and `grafana/` out of the checkout into
-  `DEPLOY_DIR` (`/opt/trade-signals` by default) itself, so the checkout
-  location isn't load-bearing after `install.sh` runs. See "Deploy
-  directory and `.env`" below.
+  (`git clone`, hand-copied files, whatever): `install.sh` copies the
+  full application tree (everything `.dockerignore` doesn't exclude) out
+  of the checkout into `DEPLOY_DIR` (`/opt/trade-signals` by default)
+  itself, so the checkout location isn't load-bearing after `install.sh`
+  runs. See "Deploy directory and `.env`" below.
 - SSH access via the keypair from `infra/terraform` (`admin_cidr`).
 - `DATA_VOLUME_ID` — the `aws_ebs_volume.data` ID, required with no
   default. Get it with:
@@ -66,25 +66,35 @@ variable isn't set.)
    has no filesystem yet, and mounts it at `/mnt/trade-signals-data`,
    referenced in `/etc/fstab` by UUID, never by device path.
 4. `03-docker-user-chain.sh` — installs a default-deny rule in the
-   `DOCKER-USER` iptables chain (everything except 80/443/established),
-   reinstalled on every boot via a systemd unit.
-5. Copies `docker-compose.yml` and `grafana/` from the checkout into
-   `DEPLOY_DIR` (`/opt/trade-signals` by default), owned by `DEPLOY_USER`,
-   and creates `$MOUNT_POINT/timescale` (the bind-mount source for
-   TimescaleDB's data directory), also owned by `DEPLOY_USER`. See
-   "Deploy directory and `.env`" below.
+   `DOCKER-USER` iptables chain, scoped to *inbound* traffic on the
+   external interface (auto-discovered via `ip route show default`, not
+   hardcoded — see the script's header): everything inbound except
+   80/443/established is dropped, but a container's own outbound traffic
+   (DNS, apt, `docker pull`, outbound API calls) leaving via that same
+   interface is unaffected. Reinstalled on every boot via a systemd unit,
+   so the interface is rediscovered fresh each boot too — an
+   instance-type change that renames the interface doesn't leave a stale
+   rule behind.
+5. Copies the full application tree — everything `.dockerignore` doesn't
+   exclude (`Dockerfile`, `requirements.txt`, `clients/`,
+   `orchestration/`, `worker/`, `ais/`, `docker-compose.yml`, `grafana/`,
+   etc.) — from the checkout into `DEPLOY_DIR` (`/opt/trade-signals` by
+   default) via `rsync -a --delete`, owned by `DEPLOY_USER`, and creates
+   `$MOUNT_POINT/timescale` (the bind-mount source for TimescaleDB's data
+   directory), also owned by `DEPLOY_USER`. See "Deploy directory and
+   `.env`" below.
 
-   **As of Phase 3 Commit 5, this step does not yet copy what
-   `worker`/`ais` need to build.** Those two services build from the
-   repo's `Dockerfile`, which needs the full application source
-   (`requirements.txt`, `clients/`, `orchestration/`, `worker/`, `ais/`,
-   etc.) as its build context — `install.sh` only stages
-   `docker-compose.yml` and `grafana/`. Until that gap is closed (a later
-   provisioning commit), get a full checkout onto the server yourself
-   before `docker compose build` — `git clone`/`git pull` at `DEPLOY_DIR`,
-   or `rsync`, either is fine, same as any other checkout-location
-   flexibility this script already tolerates. See "Building and starting
-   the application services" below.
+   `worker`/`ais` build with `build: .` in `docker-compose.yml`, and
+   Compose resolves that context relative to wherever the compose file
+   lives — `DEPLOY_DIR`, not the checkout. Staging only
+   `docker-compose.yml`/`grafana/` here (an earlier version of this step)
+   left the Dockerfile and the whole application source tree missing from
+   that context, so `docker compose build` run from `DEPLOY_DIR` had
+   nothing for its `COPY . .` to copy from. `--delete` keeps `DEPLOY_DIR`
+   in sync with the checkout on rerun without ever touching `.env` —
+   rsync's default behavior is to never delete a path the filter rules
+   exclude, and `.env`/`.env.*` are excluded explicitly, on top of
+   `.dockerignore`, for exactly that reason.
 6. Renders `trade-signals.service` (substituting `DEPLOY_DIR` and
    `DEPLOY_USER`) into `/etc/systemd/system/trade-signals.service`, then
    `daemon-reload` + `enable` (not `start` — starting is left to the
@@ -93,17 +103,18 @@ variable isn't set.)
 Each numbered script can also be run standalone (`sudo provision/01-docker.sh`,
 etc.) — `install.sh` is a thin, ordered wrapper, not the only entry point.
 Rerunning `install.sh` in full is safe: every step checks current state
-before acting, including step 5 — `grafana/` is removed and recopied
-fresh from the checkout each run (it's config, not data, so there's
-nothing to lose), and `docker-compose.yml` is simply overwritten.
+before acting, including step 5 — the `rsync -a --delete` re-sync from the
+checkout is idempotent and always overwrites application files with the
+checkout's current content, while leaving `.env` and anything else outside
+`.dockerignore`'s scope untouched.
 
 ## Deploy directory and `.env`
 
 `DEPLOY_DIR` (`/opt/trade-signals` by default, override by exporting
 `DEPLOY_DIR` before `install.sh`) is where `trade-signals.service`
 actually runs `docker compose` from — not the git checkout. `install.sh`
-populates it with `docker-compose.yml` and `grafana/`, but deliberately
-**never** touches `.env`: it's gitignored, holds real secrets
+populates it with the full application tree, but deliberately **never**
+touches `.env`: it's gitignored, holds real secrets
 (`POSTGRES_PASSWORD`, optionally `GRAFANA_PASSWORD`, and — as of Phase 3
 Commit 5 — `AISSTREAM_API_KEY`), and has to be placed there by the
 operator directly, e.g.:
@@ -133,9 +144,8 @@ run. Do this before `systemctl start trade-signals` (or
 (unchanged since Provision 4), and — as of Phase 3 Commit 5 — `worker`
 (the APScheduler process, CLAUDE.md § 11) and `ais` (the AIS WebSocket
 daemon, CLAUDE.md § 12), both built from the repo's `Dockerfile` and both
-running under `restart: unless-stopped`. From `DEPLOY_DIR`, with a full
-checkout in place (see the note on step 5 above) and `.env` populated as
-above:
+running under `restart: unless-stopped`. Step 5 above already staged the
+full build context, so from `DEPLOY_DIR`, with `.env` populated as above:
 
 ```sh
 cd /opt/trade-signals
@@ -212,8 +222,8 @@ systemctl is-enabled trade-signals               # enabled
 systemctl start trade-signals && systemctl is-active trade-signals   # active
 findmnt /mnt/trade-signals-data                  # mounted
 grep /mnt/trade-signals-data /etc/fstab          # entry uses UUID=, not a device path
-iptables -L DOCKER-USER -n                       # terminal DROP past 80/443/established
-ls /opt/trade-signals                            # docker-compose.yml, grafana/, .env
+iptables -L DOCKER-USER -n -v                    # terminal DROP past 80/443/established, scoped to the external interface (in=)
+ls /opt/trade-signals                            # full application tree (Dockerfile, clients/, worker/, ais/, docker-compose.yml, grafana/, ...), plus .env
 ```
 
 Run the full suite with `sudo -E tests/test_provision.sh` (`DATA_VOLUME_ID`
@@ -237,15 +247,19 @@ sudo tests/test_provision.sh
 ```
 
 Specifically confirm `findmnt /mnt/trade-signals-data` and
-`iptables -L DOCKER-USER -n` still show the expected state post-reboot —
-neither persists on its own without the fstab entry (mount) and the
-`trade-signals-docker-user-chain.service` unit (iptables rules) installed
-by this commit.
+`iptables -L DOCKER-USER -n -v` still show the expected state
+post-reboot — neither persists on its own without the fstab entry
+(mount) and the `trade-signals-docker-user-chain.service` unit (iptables
+rules, including re-discovering the external interface) installed by
+this commit. Also confirm `docker run --rm alpine nslookup example.com`
+still succeeds post-reboot — the same DNS check
+`tests/test_docker_user_chain_default_deny` runs, since a chain that
+reinstalled cleanly but with a misscoped rule would still leave
+`findmnt`/the DROP-exists check green while breaking every container's
+outbound traffic.
 
 ## Out of scope here
 
-Having `install.sh` itself stage a full application checkout (so
-`docker compose build` needs nothing beyond what step 5 already copies),
 S3 backups, Caddy/TLS, and healthcheck-gated `depends_on` ordering for
 `worker`/`ais` against `timescaledb`. The `04-` numbering is left open for
 these. See CLAUDE.md's `§ Deployment` and `§ Up Next` / `CONTEXT.md`.

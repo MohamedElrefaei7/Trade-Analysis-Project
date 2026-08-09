@@ -88,18 +88,62 @@ test_ufw_allows_ssh_from_admin_cidr() {
   ! echo "$v4_ssh_allow" | grep -q 'Anywhere'
 }
 
-# iptables -L DOCKER-USER -n shows a terminal DROP/REJECT rule for
-# traffic not matching 80/443/established. This is the automated
-# structural check only — it confirms the chain is built correctly, but
-# NOT that it's actually unreachable from outside: intra-host traffic
-# doesn't cross this chain the same way a real external connection does.
-# For the case that must fail if a container publishes an unintended
-# port, run this manually from a SECOND machine (never localhost):
+# Two directions, not one. The prior version of this test asserted only
+# that a terminal DROP/REJECT rule existed in DOCKER-USER — and stayed
+# green through a version of 03-docker-user-chain.sh whose DROP had no
+# interface qualifier at all, dropping every container's outbound DNS,
+# apt, and API traffic along with the inbound traffic it was meant to
+# block. A rule-existence check cannot tell "scoped correctly" from
+# "scoped to nothing"; it verified the exact rule responsible for the
+# outage and reported it correct.
+#
+# First half (structural): the terminal rule is DROP/REJECT AND scoped
+# to inbound (`-i`) on the external interface specifically — an unscoped
+# or output-scoped DROP would still pass a bare "does DROP exist"
+# check. The interface is rediscovered here the same way
+# 03-docker-user-chain.sh discovers it (`ip route show default`), not
+# hardcoded — a literal "ens5" here would go on passing even after the
+# real chain's interface name diverged from this test's assumption on an
+# instance-type change.
+#
+# Second half (live): a rule inspection only proves what iptables was
+# asked to do, not that a container can still reach the outside world
+# through it — that's exactly the direction the broken version of this
+# rule failed, invisibly, to a check that only ever looked at rule
+# shape. `docker run --rm alpine nslookup` exercises real outbound UDP/53
+# through DOCKER-USER; if the egress ACCEPT above is missing or
+# misscoped, this hangs or fails and the test catches it — the failure
+# mode a static rule inspection structurally cannot see.
+#
+# Neither half substitutes for the external-reachability check below,
+# which still requires a second machine:
 #   docker run -d -p 5432:5432 --name test-exposure alpine sleep 30
 #   nc -zv -w3 <instance-public-ip> 5432     # expect: connection refused
 #   docker rm -f test-exposure
 test_docker_user_chain_default_deny() {
-  iptables -L DOCKER-USER -n 2>/dev/null | tail -1 | grep -qE '^(DROP|REJECT)'
+  local ext_iface last_rule last_target last_in
+  ext_iface="$(ip route show default | awk '{print $5; exit}')"
+  if [[ -z "$ext_iface" ]]; then
+    echo "  could not determine external interface from 'ip route show default'" >&2
+    return 1
+  fi
+
+  last_rule="$(iptables -L DOCKER-USER -n -v 2>/dev/null | tail -1)"
+  last_target="$(awk '{print $3}' <<<"$last_rule")"
+  last_in="$(awk '{print $6}' <<<"$last_rule")"
+  if [[ ! "$last_target" =~ ^(DROP|REJECT)$ ]]; then
+    echo "  terminal DOCKER-USER rule is not DROP/REJECT: $last_rule" >&2
+    return 1
+  fi
+  if [[ "$last_in" != "$ext_iface" ]]; then
+    echo "  terminal DROP is not scoped to external interface $ext_iface (in=$last_in): $last_rule" >&2
+    return 1
+  fi
+
+  if ! timeout 15 docker run --rm alpine nslookup example.com >/dev/null 2>&1; then
+    echo "  container egress DNS lookup failed — DOCKER-USER is blocking outbound traffic" >&2
+    return 1
+  fi
 }
 
 # findmnt shows the mount active, and /etc/fstab's entry for that mount

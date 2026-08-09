@@ -17,10 +17,17 @@
 # is exactly what left `docker-compose.yml` undeployed on the instance
 # used for Commit 2c's live verification, and made
 # `test_systemd_unit_enabled_and_starts_clean` a standing documented
-# exception instead of a real pass. This script now copies
-# `docker-compose.yml` and `grafana/` from REPO_ROOT into DEPLOY_DIR
-# itself (see below), so `trade-signals.service`'s WorkingDirectory always
-# has what it needs, however the checkout arrived.
+# exception instead of a real pass. This script copies the full build
+# context — not just `docker-compose.yml` and `grafana/` — from REPO_ROOT
+# into DEPLOY_DIR (see below). `worker` and `ais` both build with
+# `build: .`, and Compose resolves that context relative to wherever
+# docker-compose.yml lives, i.e. DEPLOY_DIR, not REPO_ROOT: copying only
+# the compose file and grafana/ left the Dockerfile and the entire
+# application source tree missing from that context, so `docker compose
+# build`/`up -d --build` run from DEPLOY_DIR had nothing for `COPY . .`
+# to copy from. `.dockerignore` already states exactly what the image
+# doesn't need (`.git`, `venv/`, `tests/`, dumps, caches), so it doubles
+# as the exclude list for this copy too.
 set -euo pipefail
 
 if [[ $EUID -ne 0 ]]; then
@@ -61,25 +68,31 @@ DEPLOY_USER="$DEPLOY_USER" MOUNT_POINT="$MOUNT_POINT" DATA_VOLUME_ID="$DATA_VOLU
 echo "== 03-docker-user-chain =="
 bash "$SCRIPT_DIR/03-docker-user-chain.sh"
 
-echo "== deploying docker-compose.yml to $DEPLOY_DIR =="
+if ! command -v rsync >/dev/null 2>&1; then
+  echo "[install] installing rsync..."
+  apt-get update -qq
+  apt-get install -y -qq rsync
+fi
+
+echo "== deploying build context to $DEPLOY_DIR =="
 # Fixed deploy path, decoupled from REPO_ROOT (wherever this checkout
-# happens to live) — trade-signals.service's WorkingDirectory always
-# points here, not at the checkout. docker-compose.yml's grafana/
-# volumes (./grafana/provisioning, ./grafana/dashboards) are relative to
-# the compose file, so grafana/ has to travel with it or those bind
-# mounts silently come up as empty directories instead of the real
-# dashboards. .env is deliberately NOT copied here — it's gitignored,
-# operator-supplied secrets (POSTGRES_PASSWORD, GRAFANA_PASSWORD), placed
-# directly at $DEPLOY_DIR/.env by the operator. See provision/README.md.
+# happens to live) — trade-signals.service's WorkingDirectory, and
+# docker-compose.yml's `build: .` context for `worker`/`ais`, both point
+# here, not at the checkout. --exclude-from reuses .dockerignore (it's
+# already the list of what the image doesn't need); .env/.env.* are
+# excluded explicitly on top of that, since the operator's secrets file
+# lives only in DEPLOY_DIR and must never be overwritten by, or deleted
+# in favor of, whatever REPO_ROOT happens to have. --delete keeps
+# DEPLOY_DIR from accumulating files a later commit removed from the
+# repo — safe here specifically because rsync's default behavior is to
+# never delete a path that the filter rules exclude, so the .env
+# protection above doubles as delete-protection, not just copy-protection.
 install -d -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$DEPLOY_DIR"
-cp "$REPO_ROOT/docker-compose.yml" "$DEPLOY_DIR/docker-compose.yml"
-# rm before cp -r: on rerun, cp -r into an already-existing grafana/ would
-# nest a second copy inside it (grafana/grafana/...) instead of
-# overwriting — this isn't the persistent data volume, so a clean
-# rm+recopy from REPO_ROOT on every run is correct, not destructive.
-rm -rf "$DEPLOY_DIR/grafana"
-cp -r "$REPO_ROOT/grafana" "$DEPLOY_DIR/grafana"
-chown -R "$DEPLOY_USER":"$DEPLOY_USER" "$DEPLOY_DIR/docker-compose.yml" "$DEPLOY_DIR/grafana"
+rsync -a --delete \
+  --exclude-from="$REPO_ROOT/.dockerignore" \
+  --exclude ".env" --exclude ".env.*" \
+  "$REPO_ROOT/" "$DEPLOY_DIR/"
+chown -R "$DEPLOY_USER":"$DEPLOY_USER" "$DEPLOY_DIR"
 
 # docker-compose.yml's timescale_data volume is a bind mount (driver_opts
 # type: none, o: bind) pointed at this exact path — unlike a plain
@@ -106,7 +119,7 @@ install.sh complete. Verify:
   su - $DEPLOY_USER -c "docker compose version"  # no sudo needed
   systemctl is-enabled trade-signals             # enabled
   findmnt $MOUNT_POINT                           # data volume mounted
-  iptables -L DOCKER-USER -n                     # default-deny past 80/443/established
+  iptables -L DOCKER-USER -n -v                  # inbound default-deny past 80/443/established, scoped to the external interface
 
 Full checks: tests/test_provision.sh
 EOF

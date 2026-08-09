@@ -15,6 +15,19 @@
 # explicitly as the failure this project's law already caught once, in
 # application form — a layer reporting a state that the thing downstream
 # doesn't actually honor.
+#
+# The DROP is scoped to inbound traffic on the external interface only
+# (`-i $EXT_IFACE`). DOCKER-USER sees all forwarded traffic, including a
+# container's own outbound requests (DNS, apt, docker pull) egressing
+# through that same interface — an unscoped terminal DROP catches those
+# too, since none of them are inbound TCP 80/443 or already
+# ESTABLISHED/RELATED. That shipped once: a DROP with no interface
+# qualifier at all, which killed outbound connectivity for every
+# container on the box while looking, to a rule-existence check, exactly
+# like the working chain. The external interface is discovered at each
+# boot-time run (`ip route show default`), not hardcoded — a literal
+# device name (e.g. "ens5") is Nitro's naming today but not guaranteed
+# across an instance-type change or a second interface.
 set -euo pipefail
 
 if [[ $EUID -ne 0 ]]; then
@@ -34,13 +47,28 @@ cat > "$CHAIN_SCRIPT" <<'EOF'
 # boot via trade-signals-docker-user-chain.service.
 set -euo pipefail
 
+# Resolved fresh on every run (every boot, via the systemd unit) rather
+# than baked in once — the same instance-type change that would break a
+# hardcoded interface name is exactly the kind of thing a reboot picks up
+# on its own if this is re-discovered instead of remembered.
+EXT_IFACE="$(ip route show default | awk '{print $5; exit}')"
+if [[ -z "$EXT_IFACE" ]]; then
+  echo "[trade-signals-docker-user-chain] could not determine external interface from 'ip route show default' — refusing to install unscoped rules" >&2
+  exit 1
+fi
+
 iptables -N DOCKER-USER 2>/dev/null || true
 iptables -F DOCKER-USER
 
 iptables -A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-iptables -A DOCKER-USER -p tcp --dport 80 -j ACCEPT
-iptables -A DOCKER-USER -p tcp --dport 443 -j ACCEPT
-iptables -A DOCKER-USER -j DROP
+# Container-initiated egress (DNS, apt, docker pull, outbound API calls)
+# leaves via this same interface and must never hit the deny below —
+# only unsolicited inbound traffic on it is what this chain exists to
+# gate.
+iptables -A DOCKER-USER -o "$EXT_IFACE" -j ACCEPT
+iptables -A DOCKER-USER -i "$EXT_IFACE" -p tcp --dport 80 -j ACCEPT
+iptables -A DOCKER-USER -i "$EXT_IFACE" -p tcp --dport 443 -j ACCEPT
+iptables -A DOCKER-USER -i "$EXT_IFACE" -j DROP
 EOF
 chmod 755 "$CHAIN_SCRIPT"
 
