@@ -30,6 +30,39 @@
 # as the exclude list for this copy too.
 set -euo pipefail
 
+# Variable resolution happens before the root check and the hard-required
+# env vars below, deliberately: it has no side effects (no writes, no
+# subprocesses) and INSTALL_SH_RESOLVE_ONLY (further down) needs to reach
+# it without requiring root or DATA_VOLUME_ID/ADMIN_CIDR, so
+# tests/test_install_deploy_dir.py can exercise the default and the .git
+# guard directly.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DEPLOY_USER="${DEPLOY_USER:-deploy}"
+DEPLOY_DIR="${DEPLOY_DIR:-/opt/trade-signals}"
+MOUNT_POINT="${MOUNT_POINT:-/mnt/trade-signals-data}"
+
+# Refuse to run if DEPLOY_DIR resolves into a git checkout. rsync -a
+# --delete below is destructive; an operator who overrides DEPLOY_DIR to
+# (or forgets to override it away from) a repository checkout would sync
+# --delete the checkout out of existence, not just deploy into it. A
+# checkout is recognized by the presence of DEPLOY_DIR/.git — cheap,
+# reliable, no ambiguity about what "is a checkout" means.
+if [[ -d "$DEPLOY_DIR/.git" ]]; then
+  echo "[install] refusing to run: DEPLOY_DIR=$DEPLOY_DIR contains a .git directory" >&2
+  echo "[install] rsync -a --delete into a repository checkout would destroy it" >&2
+  exit 1
+fi
+
+# Test hook only: prints the resolved DEPLOY_DIR and exits before the root
+# check or any side effect, so the default and the guard above can be
+# asserted without root, DATA_VOLUME_ID, or ADMIN_CIDR. Never set this in
+# a real provisioning run.
+if [[ "${INSTALL_SH_RESOLVE_ONLY:-0}" == "1" ]]; then
+  echo "$DEPLOY_DIR"
+  exit 0
+fi
+
 if [[ $EUID -ne 0 ]]; then
   echo "run as root (sudo provision/install.sh)" >&2
   exit 1
@@ -49,12 +82,6 @@ fi
 # leaving SSH unreachable — see that script's header for the incident this
 # guards against.
 : "${ADMIN_CIDR:?ADMIN_CIDR is required — see provision/README.md}"
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DEPLOY_USER="${DEPLOY_USER:-deploy}"
-DEPLOY_DIR="${DEPLOY_DIR:-/opt/trade-signals}"
-MOUNT_POINT="${MOUNT_POINT:-/mnt/trade-signals-data}"
 
 echo "== 00-harden =="
 ADMIN_CIDR="$ADMIN_CIDR" bash "$SCRIPT_DIR/00-harden.sh"
