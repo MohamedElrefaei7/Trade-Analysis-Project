@@ -1,4 +1,3 @@
--- migrate:no-transaction
 -- idx_positions_vessel_ts_asc: an ascending (vessel_id, ts) index on
 -- positions, alongside the existing idx_positions_vessel_ts (vessel_id,
 -- ts DESC) from schema.sql.
@@ -13,25 +12,40 @@
 -- and near-zero CPU the whole time. See CONTEXT.md's dated entry for the
 -- full diagnosis.
 --
--- CREATE INDEX CONCURRENTLY, not a plain CREATE INDEX: positions is a
--- 9.3GB, 38.5M-row hypertable, and a plain CREATE INDEX takes a
--- SHARE lock that blocks writes to it for the build's duration — running
--- that against a table the live worker/ais containers actively write to
--- is not an acceptable trade for an index that only unblocks an offline
--- analysis script. CONCURRENTLY refuses to run inside a transaction
--- block at all, which is why this file carries the
--- migrate:no-transaction marker (orchestration/migrate.py) instead of
--- running under the runner's normal per-file transaction.
+-- No -- migrate:no-transaction marker, and no CONCURRENTLY, despite the
+-- previous commit adding exactly that marker for this purpose. Found
+-- live, the hard way, right after: TimescaleDB does not support
+-- CREATE INDEX CONCURRENTLY directly on a hypertable at all — not a
+-- chunk-count or size issue, an outright
+-- "hypertables do not support concurrent index creation" error, the same
+-- with or without ON ONLY. A plain CREATE INDEX IF NOT EXISTS is what a
+-- portable migration file can actually contain: chunk names are
+-- per-database and dynamic (e.g. _hyper_1_338_chunk), so a migration
+-- meant to apply cleanly to a fresh database can't hardcode a
+-- database-specific per-chunk CONCURRENTLY sequence anyway. On a fresh
+-- or small database this runs fast and the brief lock is a non-issue —
+-- the CONCURRENTLY concern only ever mattered for the one large,
+-- already-populated hypertable this migration was actually written for.
 --
--- Known sharp edge, inherent to CONCURRENTLY, not something this
--- migration or the runner can paper over: if a concurrent build fails
--- partway, it can leave an INVALID index object behind under this same
--- name, and a later IF NOT EXISTS rerun will skip right past it instead
--- of repairing it. If this migration is ever re-applied after a failure,
--- check first:
---   SELECT indisvalid FROM pg_index
---    WHERE indexrelid = 'idx_positions_vessel_ts_asc'::regclass;
--- and DROP INDEX idx_positions_vessel_ts_asc if it's false, before
--- rerunning.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_positions_vessel_ts_asc
+-- That table's fix shipped as a one-time, hand-run operational step
+-- instead, not as portable SQL: build a matching index CONCURRENTLY on
+-- each of positions' existing chunks individually (chunks are plain
+-- tables — CONCURRENTLY works fine on each one alone), then run this
+-- same plain CREATE INDEX statement — TimescaleDB recognizes the
+-- already-built, matching per-chunk indexes and adopts them rather than
+-- rebuilding, so the parent-level statement completes immediately
+-- instead of re-sorting 9.3GB. Full sequence, and why the DROP+CREATE
+-- pair needed the operator to run it directly rather than this session,
+-- recorded in CONTEXT.md's dated entry. This file is what makes that
+-- same end state reproducible on any other database, fresh or small,
+-- without needing to know its chunk layout — it's a no-op on the
+-- production server, since the index this describes already exists
+-- there by the time this migration ships.
+--
+-- The -- migrate:no-transaction marker itself (orchestration/migrate.py)
+-- is still real, tested infrastructure — just not needed by this
+-- particular migration once CONCURRENTLY turned out not to apply here.
+-- It remains the right tool for a future CONCURRENTLY build on a
+-- non-hypertable table.
+CREATE INDEX IF NOT EXISTS idx_positions_vessel_ts_asc
   ON positions (vessel_id, ts);

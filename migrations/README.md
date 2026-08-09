@@ -64,13 +64,36 @@ consequences worth knowing before reaching for this:
   `IF NOT EXISTS` rerun will skip right past it instead of repairing it —
   the name already exists, even though the index itself is unusable.
   Check `pg_index.indisvalid` and `DROP INDEX` before retrying a marked
-  migration that failed once. See `0004_positions_vessel_ts_index.sql`
-  for a worked example, including this exact recovery note inline.
+  migration that failed once.
+- **`CREATE INDEX CONCURRENTLY` does not work directly on a TimescaleDB
+  hypertable at all** — found live on 2026-08-09 writing
+  `0004_positions_vessel_ts_index.sql`, not a size or chunk-count
+  limitation: `ON ONLY` and without both fail the same way, with an
+  explicit `hypertables do not support concurrent index creation` error.
+  The real workaround for an existing, populated hypertable is to build a
+  matching index `CONCURRENTLY` on each of its chunks individually
+  (chunks are plain tables — `CONCURRENTLY` works fine on each one alone,
+  no marker needed at that level either since each is its own
+  `docker exec`/`psql` statement), then run a normal, non-`CONCURRENTLY`
+  `CREATE INDEX` at the hypertable level — TimescaleDB recognizes the
+  already-built, matching per-chunk indexes and adopts them instead of
+  rebuilding, so that final statement completes immediately. That
+  per-chunk sequence is inherently database-specific (chunk names like
+  `_hyper_1_338_chunk` aren't portable across databases) and was run by
+  hand on the server, not shipped as this migration's checked-in SQL —
+  see `0004_positions_vessel_ts_index.sql`'s comments and CONTEXT.md's
+  dated entry for the full sequence. This marker's real use case is a
+  non-hypertable table where `CONCURRENTLY` can run as a single portable
+  statement; for a hypertable, plan for a hand-run per-chunk step instead
+  and let the checked-in migration be the plain, idempotent statement
+  that's a no-op once that step has already happened.
 
 Reach for a plain `CREATE INDEX` (inside the normal transaction path,
 no marker) whenever the table is small enough that the brief lock is a
-non-issue — this marker is for tables where `CONCURRENTLY`'s
-no-blocking-writes property actually matters, not a default.
+non-issue, or — per the hypertable caveat above — when the table is a
+hypertable at all; this marker is for non-hypertable tables where
+`CONCURRENTLY`'s no-blocking-writes property actually matters, not a
+default.
 
 ## An applied migration is never edited
 
