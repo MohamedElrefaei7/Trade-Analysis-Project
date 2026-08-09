@@ -121,7 +121,7 @@ def test_misfire_grace_is_bounded_by_interval():
 def test_all_jobs_coalesce_and_max_instances_one(scratch_db):
     scheduler = build_scheduler()
     jobs = scheduler.get_jobs()
-    assert len(jobs) == 8
+    assert len(jobs) == 9
     for apjob in jobs:
         assert apjob.coalesce is True, f"{apjob.id} does not coalesce"
         assert apjob.max_instances == 1, f"{apjob.id} allows more than one concurrent instance"

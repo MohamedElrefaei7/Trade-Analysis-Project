@@ -79,4 +79,10 @@ CADENCES: dict[str, Cadence] = {
         max_age=timedelta(hours=30),
         misfire_grace_time=int(timedelta(hours=12).total_seconds()),
     ),
+    "heartbeat": Cadence(
+        trigger=IntervalTrigger(hours=1, timezone=UTC),
+        interval=timedelta(hours=1),
+        max_age=timedelta(hours=1.25),  # ~1.25x interval, same ratio as every other job
+        misfire_grace_time=int(timedelta(minutes=20).total_seconds()),
+    ),
 }

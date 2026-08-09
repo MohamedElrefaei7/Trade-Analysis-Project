@@ -71,6 +71,7 @@ services:
       - timescaledb
     environment:
       DATABASE_URL: postgresql://admin:${POSTGRES_PASSWORD}@timescaledb:5432/mydb
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
       AISSTREAM_API_KEY: ${AISSTREAM_API_KEY}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     logging: *default-logging

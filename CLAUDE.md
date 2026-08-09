@@ -500,7 +500,65 @@ As contract:
 
 ---
 
-## 13. Deployment (`Dockerfile`, `docker-compose.yml`)
+## 13. Monitoring (`orchestration/heartbeat.py`)
+
+The `heartbeat` job (hourly, Phase 3 Commit 6) is two independent freshness
+checks — one for every job in `JOBS`/`CADENCES`, one for the AIS feed
+itself — that post a Slack digest when something's overdue or stale.
+
+- **`max_age` comes from `worker/cadences.py::CADENCES` only —
+  `heartbeat.py` defines no thresholds of its own.** `wci-weekly` once
+  read as stale for two and a half months because a separate freshness
+  check kept its own copy of "should run weekly" out of sync with the
+  real cadence (§ 11). Every job in `CADENCES` is checked; there is no
+  opt-out list.
+- **"Last success" means the most recent `job_runs` row with
+  `status = 'success'`, by `finished_at`** — never the most recent row of
+  any status. A job that has failed every night for a week has recent
+  `job_runs` rows and no recent successes; keying off the latest row
+  regardless of status would read that as healthy.
+- **`never_succeeded` and `stale_running` are distinct reported states,
+  never folded into `overdue`.** A job with no success row ever
+  (`never_succeeded`) is the most alarming state a job can be in — a
+  naive `LEFT JOIN` silently drops it, so it's surfaced explicitly
+  instead, with no fabricated age. A job whose most recent `running` row
+  is older than its own `max_age` (`stale_running`) means the process
+  died mid-run, distinct from both `overdue` and `failed`; when a job has
+  a stale running row, it's reported only under `stale_running`, not
+  double-counted under `overdue` too, even if its last real success is
+  also old.
+- **AIS liveness is measured from `MAX(ts) FROM positions`, never from
+  the AIS daemon's own status.** The daemon writes nothing to `job_runs`
+  by design (§ 12) — a process reporting its own liveness is the same
+  failure mode Prefect had. `aisstream.io` went into silent failure on
+  2026-08-05 (connection accepted, subscription accepted, zero messages
+  delivered) and it was found by hand on 2026-08-08; every layer above
+  the data itself reported healthy. `AIS_STALE_THRESHOLD` (6 hours) is a
+  provider-outage detector, not a data-volume check — a feed running at a
+  fraction of normal volume still advances `MAX(ts)` and passes cleanly.
+- **A Slack posting failure never fails the heartbeat job.** If
+  `SLACK_WEBHOOK_URL` is unset, the findings are logged at `WARNING` and
+  the job still records `success`. If the post itself raises, it's caught
+  and logged, never re-raised — a Slack outage must not make the
+  monitoring's own failure state indistinguishable from the thing it
+  monitors failing. Reuses `alerts/builder.py::_maybe_post_slack()`
+  rather than a second webhook poster.
+- **`heartbeat` is itself a `@job`, registered in `JOBS`/`CADENCES` like
+  every other one — deliberately, not incidentally.** It writes its own
+  `job_runs` rows, so it checks its own pulse: if it stops running, its
+  own last success ages out and the next run that does happen reports
+  it. That does not cover the heartbeat never running again at all —
+  nothing internal to the scheduler can detect that; Phase 11's
+  UptimeRobot check against `/api/health` is what closes that gap.
+- **Its `rows_written` is the count of problems found, not a row
+  count** — overdue jobs + never-succeeded jobs + stale-running jobs,
+  plus one if AIS is stale. Zero is the healthy state. This is the
+  second job, after `alerts-nightly`, where the number isn't rows written
+  to a table (§ 10).
+
+---
+
+## 14. Deployment (`Dockerfile`, `docker-compose.yml`)
 
 `worker` and `ais` run as containers, both built from the same root
 `Dockerfile` and both under `restart: unless-stopped`, alongside

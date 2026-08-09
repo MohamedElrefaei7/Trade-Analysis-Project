@@ -1,16 +1,19 @@
 """
-tasks.py — the eight scheduled jobs, each a @job-decorated, zero-argument
-function returning the number of rows it wrote. Business logic stays in
-clients/, normalizer/, targets/, signals/, models/, and alerts/ — these
-are thin wrappers, one per unit the old Prefect schedule ran
-independently (see scheduler.py's docstring for the cadence this
-replaces; Commit 3 builds the scheduler that actually calls these via
-the JOBS registry below).
+tasks.py — the nine scheduled jobs, each a @job-decorated, zero-argument
+function returning the number of rows it wrote (`heartbeat` is the one
+exception — see its own docstring). Business logic stays in clients/,
+normalizer/, targets/, signals/, models/, alerts/, and orchestration/
+(heartbeat.py) — these are thin wrappers, one per unit the old Prefect
+schedule ran independently (see scheduler.py's docstring for the cadence
+this replaces; Commit 3 builds the scheduler that actually calls these
+via the JOBS registry below).
 
 Job names are the former Prefect deployment names, unchanged, character
-for character — they're the join key for Commit 3's cadence configuration
-and the Phase 11 heartbeat's per-job overdue check. See CLAUDE.md's Jobs
-contract for the full set of rules this file follows.
+for character, with one addition (`heartbeat`, Phase 3 Commit 6 — it has
+no former Prefect deployment, since it didn't exist under Prefect) —
+they're the join key for Commit 3's cadence configuration and the
+heartbeat's own per-job overdue check. See CLAUDE.md's Jobs contract for
+the full set of rules this file follows.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from signals import run_all as _signals_run_all
 from models import run_all as _models_run_all
 from alerts import run_all as _alerts_run_all
 
+from .heartbeat import run_all as _heartbeat_run_all
 from .jobs import job
 
 
@@ -166,6 +170,27 @@ def alerts_nightly() -> int:
     return _alerts_run_all()
 
 
+@job("heartbeat")
+def heartbeat() -> int:
+    """Hourly: checks every job in worker/cadences.py::CADENCES for
+    overdue/never-succeeded/stale-running last-success state, and
+    separately checks whether the AIS feed itself (MAX(ts) FROM
+    positions) is still advancing. Posts a Slack digest if anything's
+    wrong and SLACK_WEBHOOK_URL is set; a Slack failure never fails this
+    job. Returns the number of problems found — overdue jobs +
+    never-succeeded jobs + stale-running jobs + 1 if AIS is stale — not
+    rows written to any table; this is the second job, after
+    alerts-nightly, where the number isn't a row count. Zero is healthy.
+
+    Being itself a @job means it checks its own pulse too: if the
+    heartbeat stops running, its own last success ages out and the next
+    run that does happen reports it. That doesn't cover the heartbeat
+    never running again at all — see orchestration/heartbeat.py's
+    docstring for why, and Phase 11's UptimeRobot /api/health check for
+    the piece that closes that gap."""
+    return _heartbeat_run_all()
+
+
 JOBS: dict[str, Callable[[], int]] = {
     "port-call-refresh": port_call_refresh,
     "bdi-daily": bdi_daily,
@@ -175,4 +200,5 @@ JOBS: dict[str, Callable[[], int]] = {
     "signals-nightly": signals_nightly,
     "models-nightly": models_nightly,
     "alerts-nightly": alerts_nightly,
+    "heartbeat": heartbeat,
 }

@@ -1,5 +1,5 @@
 """
-test_tasks.py — enforcement tests for orchestration/tasks.py's eight
+test_tasks.py — enforcement tests for orchestration/tasks.py's nine
 @job-decorated functions and the JOBS registry.
 
 Each test that touches job_runs runs against a disposable scratch database
@@ -40,6 +40,7 @@ EXPECTED_JOB_NAMES = {
     "signals-nightly",
     "models-nightly",
     "alerts-nightly",
+    "heartbeat",
 }
 
 
@@ -92,7 +93,7 @@ def _fetch_all(database_url: str, query: str, params=None):
 
 
 def _stub_every_underlying_dependency(monkeypatch, **overrides) -> None:
-    """Stub all eight underlying calls tasks.py's jobs delegate to, so a
+    """Stub all nine underlying calls tasks.py's jobs delegate to, so a
     full run of every JOBS entry never touches a real external service or
     a real database beyond job_runs itself. `overrides` replaces specific
     stub return values by dependency attribute name."""
@@ -105,6 +106,7 @@ def _stub_every_underlying_dependency(monkeypatch, **overrides) -> None:
         "_signals_run_all": lambda: 0,
         "_models_run_all": lambda: 0,
         "_alerts_run_all": lambda: 0,
+        "_heartbeat_run_all": lambda: 0,
     }
     defaults.update(overrides)
     for attr, stub in defaults.items():
@@ -114,7 +116,7 @@ def _stub_every_underlying_dependency(monkeypatch, **overrides) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_jobs_registry_contains_exactly_the_eight_expected_names():
+def test_jobs_registry_contains_exactly_the_nine_expected_names():
     assert set(JOBS.keys()) == EXPECTED_JOB_NAMES
 
 
@@ -135,6 +137,7 @@ def test_all_jobs_return_int(scratch_db, monkeypatch):
         _signals_run_all=lambda: 6,
         _models_run_all=lambda: 7,
         _alerts_run_all=lambda: 8,
+        _heartbeat_run_all=lambda: 9,
     )
 
     for name, fn in JOBS.items():
