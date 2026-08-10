@@ -466,3 +466,17 @@ def test_imports_vessel_normalizer_rather_than_reimplementing():
         "rederive.py defines its own _smoothed_transitions — this shadows/duplicates "
         "vessel_normalizer's instead of reusing the imported one"
     )
+
+
+def test_chunk_days_default_is_one():
+    """CHUNK_DAYS=7 was measured live to be the actual re-derivation
+    bottleneck (CONTEXT.md's 2026-08-10 entry): a held server-side cursor
+    pays a large, roughly constant per-FETCH cost that does not shrink
+    with a bigger yield_per, so a single query's total working set is what
+    matters, not round-trip count. The same 15.6M-row week that did not
+    complete in 10+ minutes at chunk_days=7 completed in 443s at
+    chunk_days=1, with no individual day slow (worst day: 88s for 3.66M
+    rows). This is a one-line constant, easy to "clean up" back toward the
+    old value without knowing why — guard it so a revert is caught here
+    rather than live, hours into a re-run."""
+    assert rederive.CHUNK_DAYS == 1

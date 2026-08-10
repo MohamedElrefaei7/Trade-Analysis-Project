@@ -62,7 +62,7 @@ Chunked processing with carried per-vessel state (decision 3)
 ------------------------------------------------------------------
 38.5M position rows — peaking at over 17M in a single week — will not
 fit in memory on a 2 GiB box. The full history is walked in CHUNK_DAYS
-(7) windows, streamed from Postgres (execution_options(yield_per=...))
+(1) windows, streamed from Postgres (execution_options(yield_per=...))
 rather than fetched whole. Memory that persists across chunks is bounded
 to one _VesselState per vessel seen: up to WINDOW_SIZE-1 raw pings (the
 majority-vote window's warm-up tail) plus a single prev_state bool — a
@@ -73,6 +73,27 @@ the chunk boundary and feeding (carry + new pings) through
 _smoothed_transitions as one continuous sequence is what prevents that —
 the same class of bug Commit 4 fixed for daemon restarts, reproduced here
 across chunk boundaries if state isn't carried.
+
+CHUNK_DAYS was 7 (calendar week) through 2026-08-09; changed to 1 after
+that value was measured, live, to be the actual blocker (see CONTEXT.md's
+2026-08-10 entry). A held server-side cursor (stream_results=True,
+required to bound client memory the same way) runs its underlying plan
+without parallel workers — confirmed directly via pg_stat_activity during
+an active FETCH, no `parallel worker` backend rows appear — and pays a
+roughly constant, large per-FETCH cost that does not shrink with a bigger
+yield_per (measured: batch sizes of 2,000/20,000/50,000 against the same
+15.6M-row chunk showed no meaningful improvement; three consecutive
+50,000-row FETCHes from the same open cursor cost ~17-20s *each*, not
+"slow first FETCH, fast the rest," ruling out a one-time
+materialize-before-first-row explanation). The same week processed as six
+CHUNK_DAYS=1 windows — same query, same cursor, same yield_per, only a
+smaller per-window row count — completed in 443s total with no window
+individually slow; the single busiest day in that week (3.66M rows) alone
+took 88s. Root cause is not fully isolated beyond "the per-fetch cost
+scales worse than linearly with the single query's total working set on
+this box's ~600MB of available memory," but the fix that empirically
+closes the gap needed no change to the fetch/cursor mechanics at all —
+only to how much any single one of them is asked to hold.
 
 Data gaps are a third state, never silently "no transition" (decision 4)
 ------------------------------------------------------------------
@@ -130,7 +151,7 @@ from normalizer.vessel_normalizer import (
 
 # ── Tunables ─────────────────────────────────────────────────────────────────
 
-CHUNK_DAYS = 7                  # matches positions's own hypertable chunk interval
+CHUNK_DAYS = 1                   # was 7; measured to be the client-side wait-bound bottleneck — see module docstring
 GAP_THRESHOLD_HOURS = 6.0       # a ping gap wider than this makes the prior state unknown, not carried
 QUERY_BATCH_SIZE = 2000         # server-side cursor batch size for the per-chunk positions query
 SOURCE_LABEL = "rederive"
