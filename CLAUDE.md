@@ -132,6 +132,33 @@ dump — including the Phase 11 nightly backup and its monthly restore test
 — verifies with `-f /dev/null` or it has not verified anything. Full
 diagnostic sequence in `CONTEXT.md`'s dated log entry.
 
+### `ANALYZE` follows every restore — part of restoring, not a one-time repair
+
+`pg_restore` populates tables by bulk COPY, which does not update planner
+statistics the way normal write traffic (and autovacuum's analyze
+threshold) eventually would. A freshly restored database has stale or
+absent statistics on any table autovacuum hasn't caught up to yet, and
+the planner will misjudge selectivity and cost until it does — `ANALYZE
+positions;` (or a bare `ANALYZE;` for the whole database) is the last
+step of any restore, every time, not a fix applied once and forgotten.
+This is an operator command run by hand after `pg_restore`, never a
+migration: it's not a schema change, produces no DDL, and needs to
+re-run whenever the data changes substantially — the opposite of what
+the checksum-guarded, run-once `migrations/` machinery is for (§ 9). It
+is also not a standing scheduled job (no `maintenance-weekly` entry in
+`worker/cadences.py::CADENCES`): autovacuum handles ongoing statistics
+correctly once normal write activity resumes, and a permanent job would
+exist to work around a transient post-restore condition, plus mask the
+real signal if autovacuum ever genuinely stopped working. See
+`CONTEXT.md`'s 2026-08-09/10 entries: statistics were checked directly
+against a live, previously-restored `positions` (38.5M rows, chunk-level
+`last_autoanalyze` present from a prior autovacuum pass, but the
+hypertable *parent*'s own `pg_stat_user_tables` row is — expectedly, not
+a symptom of anything — always empty, since a hypertable parent holds no
+rows itself) and a fresh `ANALYZE positions` was run and measured; it did
+not change the query plan for the case investigated there, but running
+it remains correct hygiene after any restore regardless.
+
 ---
 
 ## 4. Conventions
