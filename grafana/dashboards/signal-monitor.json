@@ -344,12 +344,10 @@
           "selected": true,
           "text": [
             "BDI.daily_close",
-            "FBX.composite",
             "port.CNSHA.vessels_in_port"
           ],
           "value": [
             "BDI.daily_close",
-            "FBX.composite",
             "port.CNSHA.vessels_in_port"
           ]
         },

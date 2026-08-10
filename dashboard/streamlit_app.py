@@ -354,11 +354,6 @@ if start >= end:
 # A feature is only "overdue" if age_days > max_age_days for its cadence.
 # The rules are ordered most-specific first; first match wins.
 _CADENCE_RULES: list[tuple[str, int, str]] = [
-    ("FRED.GDP.",            120, "quarterly"),
-    ("FRED.trade_balance.",   60, "monthly"),
-    ("FRED.AUDUSD.",           5, "daily"),
-    ("FRED.CNYUSD.",           5, "daily"),
-    ("COMTRADE.",             90, "monthly"),
     ("port.USLAX.",           60, "monthly"),
     ("WCI.",                  12, "weekly"),
     ("BDI.",                   4, "daily"),
@@ -1083,9 +1078,7 @@ def render_explore_tab() -> None:
     default_features = [
         f for f in (
             "BDI.daily_close",
-            "FRED.INDPRO",
             "port.CNSHA.vessels_in_port",
-            "air.cargo_flights.daily",
         ) if f in all_features
     ] or all_features[: min(5, len(all_features))]
 

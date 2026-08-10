@@ -117,9 +117,7 @@ default_features = [
     f
     for f in (
         "BDI.daily_close",
-        "FRED.INDPRO",
         "port.CNSHA.vessels_in_port",
-        "air.cargo_flights.daily",
     )
     if f in all_features
 ] or all_features[: min(5, len(all_features))]
