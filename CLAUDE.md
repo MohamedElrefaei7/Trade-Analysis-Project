@@ -462,6 +462,23 @@ isn't flagged overdue.
   scheduler blocks — a job with no cadence would otherwise simply never
   run, and a cadence naming no job would crash hours later at fire time,
   in a log nobody's watching.
+- **`apscheduler_jobs` is created and owned entirely by APScheduler's
+  `SQLAlchemyJobStore`** — not by any migration in `migrations/`, and
+  deliberately absent from `schema_migrations`. It holds pickled Python
+  state (each row's `job_state` column), not plain relational data, so it
+  is never hand-modified and never hand-migrated: a schema change to a
+  `@job`-decorated function's signature or to `Cadence` itself is not
+  something you edit this table to reflect. Its contents are disposable —
+  deleting every row costs exactly one scheduling cycle, since
+  `worker/main.py` re-registers every job from `CADENCES` on startup (see
+  above: it does not re-`add_job()` an already-persisted job, but an
+  *empty* jobstore has nothing persisted to skip, so a fresh start from
+  zero rows re-adds all nine cleanly). Phase 11's backup job must exclude
+  it (`pg_dump --exclude-table=apscheduler_jobs`): restoring pickled
+  scheduler state from a month-old dump resurrects stale fire times and
+  may not even unpickle cleanly against a newer APScheduler version than
+  the one that wrote it — the disposability above is exactly why excluding
+  it from the backup costs nothing.
 
 ---
 
