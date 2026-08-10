@@ -60,6 +60,24 @@ def _polite_delay(lo: float = 2.0, hi: float = 5.0) -> None:
     time.sleep(random.uniform(lo, hi))
 
 
+class ScraperFetchFailure(RuntimeError):
+    """
+    Raised when a fetch helper (_fetch_bdi_posts / _fetch_wci_posts) hits a
+    network or HTTP error on its very first page — i.e. before accumulating
+    any posts at all. Deliberately distinct from "zero new posts": a page-1
+    timeout/DNS failure/non-200 response and a genuinely quiet news day both
+    end with an empty list unless this is raised, and the scraper functions'
+    `if not posts: return 0` can't tell them apart. Letting this propagate
+    turns it into a `failed` job_runs row instead of a silent
+    `success, rows_written=0` — the same shape of fix WCIParseFailure already
+    applies to the parse layer, one layer up.
+
+    Not raised for a failure on page 2+ after earlier pages already yielded
+    posts: those posts are real, already-fetched data, and returning them
+    (rather than discarding them by raising) is strictly more correct.
+    """
+
+
 # ── Shared DB helpers ─────────────────────────────────────────────────────────
 
 def _insert_bench_rows(session, rows: list[dict]) -> int:
@@ -174,10 +192,21 @@ def _fetch_bdi_posts(latest_ts: datetime | None, max_pages: int = 10) -> list[di
             )
             if resp.status_code != 200:
                 logger.warning("BDI: HSN API page %d HTTP %d", page, resp.status_code)
+                if not out:
+                    raise ScraperFetchFailure(
+                        f"BDI: HSN API returned HTTP {resp.status_code} on page {page} "
+                        "with no posts fetched yet"
+                    )
                 break
             posts = resp.json()
+        except ScraperFetchFailure:
+            raise
         except Exception as exc:
             logger.warning("BDI: HSN API error on page %d — %s", page, exc)
+            if not out:
+                raise ScraperFetchFailure(
+                    f"BDI: HSN API request failed on page {page} with no posts fetched yet — {exc}"
+                ) from exc
             break
 
         if not posts:
@@ -458,10 +487,21 @@ def _fetch_wci_posts(latest_ts: datetime | None, max_pages: int = 5) -> list[dic
             )
             if resp.status_code != 200:
                 logger.warning("WCI: HSN API page %d HTTP %d", page, resp.status_code)
+                if not out:
+                    raise ScraperFetchFailure(
+                        f"WCI: HSN API returned HTTP {resp.status_code} on page {page} "
+                        "with no posts fetched yet"
+                    )
                 break
             posts = resp.json()
+        except ScraperFetchFailure:
+            raise
         except Exception as exc:
             logger.warning("WCI: HSN API error on page %d — %s", page, exc)
+            if not out:
+                raise ScraperFetchFailure(
+                    f"WCI: HSN API request failed on page {page} with no posts fetched yet — {exc}"
+                ) from exc
             break
 
         if not posts:
