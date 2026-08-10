@@ -150,6 +150,69 @@ def test_images_are_pinned():
         )
 
 
+def test_slack_webhook_url_only_on_worker():
+    """SLACK_WEBHOOK_URL must be declared on worker and no other service —
+    the exact mistake this test exists to catch: the webhook once landed
+    on ais's environment block instead, caught only after four round
+    trips rather than by any automated check (see CONTEXT.md's dated
+    entry). alerts/builder.py's Slack post runs inside worker's
+    alerts-nightly job; ais has no code path that touches Slack at all."""
+    services = _services()
+    for name, cfg in services.items():
+        env = cfg.get("environment", {})
+        has_it = "SLACK_WEBHOOK_URL" in env
+        if name == "worker":
+            assert has_it, "service 'worker' must declare SLACK_WEBHOOK_URL"
+        else:
+            assert not has_it, (
+                f"service {name!r} must not declare SLACK_WEBHOOK_URL — "
+                "only worker posts to Slack"
+            )
+
+
+def test_database_url_on_worker_and_ais_only():
+    """DATABASE_URL must be declared on both worker and ais (both talk to
+    Postgres directly) and on no other service — timescaledb is the
+    database itself and configures via POSTGRES_* instead, and grafana
+    reaches Postgres through its own datasource provisioning, not this
+    variable."""
+    services = _services()
+    for name, cfg in services.items():
+        env = cfg.get("environment", {})
+        has_it = "DATABASE_URL" in env
+        if name in ("worker", "ais"):
+            assert has_it, f"service {name!r} must declare DATABASE_URL"
+        else:
+            assert not has_it, f"service {name!r} must not declare DATABASE_URL"
+
+
+def test_no_service_declares_an_unused_environment_variable():
+    """Each service's environment block is exactly the set of variables its
+    own code path actually reads — nothing extra. An exact-set check
+    (not just "the required ones are present") is what would have caught
+    SLACK_WEBHOOK_URL landing on ais in one second: a wrong-service
+    variable is silently harmless in Compose (an unused env var doesn't
+    fail a container start), so nothing short of an explicit allowlist
+    per service catches it."""
+    expected: dict[str, set[str]] = {
+        "timescaledb": {"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB"},
+        "grafana": {"GF_SECURITY_ADMIN_PASSWORD", "GF_USERS_ALLOW_SIGN_UP"},
+        "worker": {"DATABASE_URL", "LOG_LEVEL", "SLACK_WEBHOOK_URL"},
+        "ais": {"DATABASE_URL", "AISSTREAM_API_KEY", "LOG_LEVEL"},
+    }
+    services = _services()
+    assert set(services) == set(expected), (
+        f"service list changed ({sorted(services)}) — update this test's "
+        "expected map alongside it"
+    )
+    for name, expected_keys in expected.items():
+        actual_keys = set(services[name].get("environment", {}))
+        assert actual_keys == expected_keys, (
+            f"service {name!r} environment is {sorted(actual_keys)}, "
+            f"expected exactly {sorted(expected_keys)}"
+        )
+
+
 def test_dockerignore_excludes_secrets_and_dumps():
     """.env, *.dump, and backups/ must never be shipped into an image layer
     — .env because a secret baked into a layer persists even after a later
